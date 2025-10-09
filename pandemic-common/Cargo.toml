@@ -1,0 +1,14 @@
+[package]
+name = "pandemic-common"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+pandemic-protocol = { path = "../pandemic-protocol" }
+tokio = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+
+[dev-dependencies]
+tokio-test = "0.4"
+tempfile = "3.0"
