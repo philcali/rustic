@@ -2,6 +2,7 @@ use anyhow::Result;
 use pandemic_protocol::{PluginInfo, Request};
 use pandemic_common::DaemonClient;
 use std::collections::HashMap;
+use std::env;
 use std::path::PathBuf;
 use tracing::info;
 use clap::Parser;
@@ -24,6 +25,7 @@ async fn main() -> Result<()> {
     
     let plugin = PluginInfo {
         name: "hello-infection".to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
         description: Some("A simple hello world infection plugin".to_string()),
         config: Some(config),
         registered_at: None,

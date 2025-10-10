@@ -36,6 +36,15 @@ impl Daemon {
                 self.plugins.insert(plugin.name.clone(), plugin);
                 Response::success()
             }
+            Request::Deregister { name } => {
+                match self.plugins.remove(&name) {
+                    Some(_) => {
+                        info!("Deregistered plugin: {}", name);
+                        Response::success()
+                    }
+                    None => Response::not_found(format!("Plugin '{}' not found", name)),
+                }
+            }
             Request::ListPlugins => {
                 let plugins: Vec<&PluginInfo> = self.plugins.values().collect();
                 Response::success_with_data(json!(plugins))

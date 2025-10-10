@@ -39,6 +39,11 @@ enum DaemonAction {
         /// Plugin name
         name: String,
     },
+    /// Deregister a plugin
+    Deregister {
+        /// Plugin name
+        name: String,
+    },
     /// Check daemon status
     Status,
 }
@@ -78,6 +83,7 @@ async fn daemon_command(socket_path: &PathBuf, action: DaemonAction) -> Result<(
     let request = match action {
         DaemonAction::List => Request::ListPlugins,
         DaemonAction::Get { name } => Request::GetPlugin { name },
+        DaemonAction::Deregister { name } => Request::Deregister { name },
         DaemonAction::Status => {
             println!("Daemon is running at {:?}", socket_path);
             return Ok(());

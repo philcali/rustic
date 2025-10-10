@@ -26,6 +26,7 @@ async fn register_with_daemon(socket_path: &PathBuf, bind_addr: &SocketAddr) -> 
     
     let plugin = PluginInfo {
         name: "pandemic-udp".to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
         description: Some("UDP proxy for pandemic daemon".to_string()),
         config: Some(config),
         registered_at: None,

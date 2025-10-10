@@ -52,6 +52,7 @@ mod tests {
                         if name == "test-plugin" {
                             let plugin = PluginInfo {
                                 name: "test-plugin".to_string(),
+                                version: "1.0.0".to_string(),
                                 description: Some("Test plugin".to_string()),
                                 config: None,
                                 registered_at: None,
@@ -62,6 +63,13 @@ mod tests {
                         }
                     }
                     Request::Register { .. } => Response::success(),
+                    Request::Deregister { name } => {
+                        if name == "test-plugin" {
+                            Response::success()
+                        } else {
+                            Response::not_found("Plugin not found")
+                        }
+                    }
                 };
                 
                 let response_json = serde_json::to_string(&response).unwrap();
@@ -136,6 +144,7 @@ mod tests {
         
         let plugin = PluginInfo {
             name: "test-plugin".to_string(),
+            version: "1.0.0".to_string(),
             description: Some("Test plugin".to_string()),
             config: Some(HashMap::new()),
             registered_at: None,
