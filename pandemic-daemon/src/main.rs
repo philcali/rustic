@@ -53,14 +53,20 @@ impl EventBus {
             });
 
             if matches {
-                info!("Matched event source {}, topic {} for plugin {}", event.source, event.topic, plugin_name);
+                info!(
+                    "Matched event source {}, topic {} for plugin {}",
+                    event.source, event.topic, plugin_name
+                );
 
                 // Find the connection for this plugin and send event
-                for (_, context) in connections {
+                for context in connections.values() {
                     if let Some(ref conn_plugin_name) = context.plugin_name {
                         if conn_plugin_name == plugin_name {
-                            if let Err(_) = context.event_sender.send(event.clone()) {
-                                warn!("Failed to send event to plugin {}, channel closed", plugin_name);
+                            if context.event_sender.send(event.clone()).is_err() {
+                                warn!(
+                                    "Failed to send event to plugin {}, channel closed",
+                                    plugin_name
+                                );
                             }
                             break;
                         }
@@ -144,12 +150,10 @@ impl Daemon {
                 let plugins: Vec<&PluginInfo> = self.plugins.values().collect();
                 Response::success_with_data(json!(plugins))
             }
-            Request::GetPlugin { name } => {
-                match self.plugins.get(&name) {
-                    Some(plugin) => Response::success_with_data(json!(plugin)),
-                    None => Response::not_found(format!("Plugin '{}' not found", name)),
-                }
-            }
+            Request::GetPlugin { name } => match self.plugins.get(&name) {
+                Some(plugin) => Response::success_with_data(json!(plugin)),
+                None => Response::not_found(format!("Plugin '{}' not found", name)),
+            },
             Request::Subscribe { topics } => {
                 if let Some(context) = self.connections.get(connection_id) {
                     if let Some(plugin_name) = &context.plugin_name {
@@ -176,7 +180,10 @@ impl Daemon {
             }
             Request::Publish { topic, data } => {
                 let source = if let Some(context) = self.connections.get(connection_id) {
-                    context.plugin_name.clone().unwrap_or_else(|| "unknown".to_string())
+                    context
+                        .plugin_name
+                        .clone()
+                        .unwrap_or_else(|| "unknown".to_string())
                 } else {
                     "unknown".to_string()
                 };
@@ -210,7 +217,10 @@ impl Daemon {
                 if self.event_bus.subscribers.contains_key(plugin_name) {
                     self.event_bus.remove_plugin(plugin_name);
                     self.plugins.remove(plugin_name);
-                    info!("Removed plugin {} due to persistent connection close", plugin_name);
+                    info!(
+                        "Removed plugin {} due to persistent connection close",
+                        plugin_name
+                    );
                 } else {
                     info!("Transient connection for plugin {} closed", plugin_name);
                 }

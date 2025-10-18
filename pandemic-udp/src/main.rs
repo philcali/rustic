@@ -1,13 +1,13 @@
 use anyhow::Result;
 use clap::Parser;
-use pandemic_protocol::{PluginInfo, Request, Response};
 use pandemic_common::{DaemonClient, PersistentClient};
+use pandemic_protocol::{PluginInfo, Request, Response};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::net::UdpSocket;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{mpsc, Mutex};
 use tracing::{error, info, warn};
 
 #[derive(Parser)]
@@ -16,16 +16,19 @@ use tracing::{error, info, warn};
 struct Args {
     #[arg(long, default_value = "/var/run/pandemic/pandemic.sock")]
     socket_path: PathBuf,
-    
+
     #[arg(long, default_value = "0.0.0.0:8080")]
     bind_addr: SocketAddr,
 }
 
-async fn create_persistent_client(socket_path: &PathBuf, bind_addr: &SocketAddr) -> Result<PersistentClient> {
+async fn create_persistent_client(
+    socket_path: &PathBuf,
+    bind_addr: &SocketAddr,
+) -> Result<PersistentClient> {
     let mut config = HashMap::new();
     config.insert("bind_address".to_string(), bind_addr.to_string());
     config.insert("protocol".to_string(), "UDP".to_string());
-    
+
     let plugin = PluginInfo {
         name: "pandemic-udp".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
@@ -33,19 +36,24 @@ async fn create_persistent_client(socket_path: &PathBuf, bind_addr: &SocketAddr)
         config: Some(config),
         registered_at: None,
     };
-    
+
     let mut client = DaemonClient::connect(socket_path).await?;
     let request = Request::Register { plugin };
     let response = client.send_request(&request).await?;
     info!("Registration response: {:?}", response);
-    
+
     // Subscribe to plugin deregister events
-    client.subscribe(vec!["plugin.deregistered".to_string()]).await?;
+    client
+        .subscribe(vec!["plugin.deregistered".to_string()])
+        .await?;
 
     Ok(client)
 }
 
-async fn proxy_request(client: &Arc<Mutex<PersistentClient>>, request_data: &[u8]) -> Result<Vec<u8>> {
+async fn proxy_request(
+    client: &Arc<Mutex<PersistentClient>>,
+    request_data: &[u8],
+) -> Result<Vec<u8>> {
     let request: Request = serde_json::from_slice(request_data)?;
     let response = {
         let mut client_guard = client.lock().await;
@@ -58,13 +66,13 @@ async fn proxy_request(client: &Arc<Mutex<PersistentClient>>, request_data: &[u8
 async fn run_udp_server(
     client: Arc<Mutex<PersistentClient>>,
     bind_addr: SocketAddr,
-    mut shutdown_rx: mpsc::Receiver<()>
+    mut shutdown_rx: mpsc::Receiver<()>,
 ) -> Result<()> {
     let udp_socket = UdpSocket::bind(bind_addr).await?;
     info!("UDP proxy listening on {}", bind_addr);
-    
+
     let mut buf = vec![0u8; 4096];
-    
+
     loop {
         tokio::select! {
             // Handle UDP requests
@@ -108,7 +116,7 @@ async fn run_udp_server(
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
     let args = Args::parse();
-    
+
     // Create persistent connection and register
     let client = create_persistent_client(&args.socket_path, &args.bind_addr).await?;
     let client = Arc::new(Mutex::new(client));
