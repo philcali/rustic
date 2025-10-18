@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use pandemic_protocol::{Request, Response};
 use pandemic_common::DaemonClient;
+use pandemic_protocol::{Request, Response};
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -11,7 +11,7 @@ use std::process::Command;
 struct Args {
     #[arg(long, default_value = "/var/run/pandemic/pandemic.sock")]
     socket_path: PathBuf,
-    
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -136,11 +136,9 @@ WantedBy=multi-user.target
 
             let service_path = format!("/etc/systemd/system/pandemic-{}.service", name);
             std::fs::write(&service_path, service_content)?;
-            
-            Command::new("systemctl")
-                .args(["daemon-reload"])
-                .status()?;
-            
+
+            Command::new("systemctl").args(["daemon-reload"]).status()?;
+
             Command::new("systemctl")
                 .args(["enable", &format!("pandemic-{}", name)])
                 .status()?;
@@ -149,21 +147,19 @@ WantedBy=multi-user.target
         }
         ServiceAction::Uninstall { name } => {
             let service_name = format!("pandemic-{}", name);
-            
+
             Command::new("systemctl")
                 .args(["stop", &service_name])
                 .status()?;
-            
+
             Command::new("systemctl")
                 .args(["disable", &service_name])
                 .status()?;
 
             let service_path = format!("/etc/systemd/system/{}.service", service_name);
             std::fs::remove_file(&service_path)?;
-            
-            Command::new("systemctl")
-                .args(["daemon-reload"])
-                .status()?;
+
+            Command::new("systemctl").args(["daemon-reload"]).status()?;
 
             println!("Uninstalled service: {}", service_name);
         }

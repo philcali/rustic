@@ -13,10 +13,11 @@ mod time_format {
         match time {
             Some(t) => {
                 let duration = t.duration_since(UNIX_EPOCH).unwrap();
-                let datetime = chrono::DateTime::<chrono::Utc>::from_timestamp(duration.as_secs() as i64, 0)
-                    .unwrap()
-                    .format("%Y-%m-%d %H:%M:%S UTC")
-                    .to_string();
+                let datetime =
+                    chrono::DateTime::<chrono::Utc>::from_timestamp(duration.as_secs() as i64, 0)
+                        .unwrap()
+                        .format("%Y-%m-%d %H:%M:%S UTC")
+                        .to_string();
                 serializer.serialize_str(&datetime)
             }
             None => serializer.serialize_none(),
@@ -48,13 +49,26 @@ pub struct PluginInfo {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum Request {
-    Register { plugin: PluginInfo },
-    Deregister { name: String },
+    Register {
+        plugin: PluginInfo,
+    },
+    Deregister {
+        name: String,
+    },
     ListPlugins,
-    GetPlugin { name: String },
-    Subscribe { topics: Vec<String> },
-    Unsubscribe { topics: Vec<String> },
-    Publish { topic: String, data: serde_json::Value },
+    GetPlugin {
+        name: String,
+    },
+    Subscribe {
+        topics: Vec<String>,
+    },
+    Unsubscribe {
+        topics: Vec<String>,
+    },
+    Publish {
+        topic: String,
+        data: serde_json::Value,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -91,11 +105,15 @@ impl Response {
     }
 
     pub fn error(message: impl Into<String>) -> Self {
-        Self::Error { message: message.into() }
+        Self::Error {
+            message: message.into(),
+        }
     }
 
     pub fn not_found(message: impl Into<String>) -> Self {
-        Self::NotFound { message: message.into() }
+        Self::NotFound {
+            message: message.into(),
+        }
     }
 }
 
@@ -109,7 +127,7 @@ mod tests {
     fn test_plugin_info_serialization() {
         let mut config = HashMap::new();
         config.insert("key1".to_string(), "value1".to_string());
-        
+
         let plugin = PluginInfo {
             name: "test-plugin".to_string(),
             version: "1.0.0".to_string(),
@@ -117,10 +135,10 @@ mod tests {
             config: Some(config),
             registered_at: None,
         };
-        
+
         let json = serde_json::to_string(&plugin).unwrap();
         let deserialized: PluginInfo = serde_json::from_str(&json).unwrap();
-        
+
         assert_eq!(plugin.name, deserialized.name);
         assert_eq!(plugin.description, deserialized.description);
         assert_eq!(plugin.config, deserialized.config);
@@ -135,14 +153,14 @@ mod tests {
             config: None,
             registered_at: None,
         };
-        
+
         let request = Request::Register { plugin };
         let json = serde_json::to_string(&request).unwrap();
-        
+
         assert!(json.contains(r#""type":"Register""#));
         assert!(json.contains(r#""name":"test-plugin""#));
         assert!(json.contains(r#""version":"1.0.0""#));
-        
+
         let deserialized: Request = serde_json::from_str(&json).unwrap();
         match deserialized {
             Request::Register { plugin } => assert_eq!(plugin.name, "test-plugin"),
@@ -152,12 +170,14 @@ mod tests {
 
     #[test]
     fn test_deregister_request_serialization() {
-        let request = Request::Deregister { name: "test-plugin".to_string() };
+        let request = Request::Deregister {
+            name: "test-plugin".to_string(),
+        };
         let json = serde_json::to_string(&request).unwrap();
-        
+
         assert!(json.contains(r#""type":"Deregister""#));
         assert!(json.contains(r#""name":"test-plugin""#));
-        
+
         let deserialized: Request = serde_json::from_str(&json).unwrap();
         match deserialized {
             Request::Deregister { name } => assert_eq!(name, "test-plugin"),
@@ -169,24 +189,26 @@ mod tests {
     fn test_list_plugins_request_serialization() {
         let request = Request::ListPlugins;
         let json = serde_json::to_string(&request).unwrap();
-        
+
         assert_eq!(json, r#"{"type":"ListPlugins"}"#);
-        
+
         let deserialized: Request = serde_json::from_str(&json).unwrap();
         match deserialized {
-            Request::ListPlugins => {},
+            Request::ListPlugins => {}
             _ => panic!("Expected ListPlugins request"),
         }
     }
 
     #[test]
     fn test_get_plugin_request_serialization() {
-        let request = Request::GetPlugin { name: "test-plugin".to_string() };
+        let request = Request::GetPlugin {
+            name: "test-plugin".to_string(),
+        };
         let json = serde_json::to_string(&request).unwrap();
-        
+
         assert!(json.contains(r#""type":"GetPlugin""#));
         assert!(json.contains(r#""name":"test-plugin""#));
-        
+
         let deserialized: Request = serde_json::from_str(&json).unwrap();
         match deserialized {
             Request::GetPlugin { name } => assert_eq!(name, "test-plugin"),
@@ -198,9 +220,9 @@ mod tests {
     fn test_success_response_serialization() {
         let response = Response::success();
         let json = serde_json::to_string(&response).unwrap();
-        
+
         assert!(json.contains(r#""status":"Success""#));
-        
+
         let deserialized: Response = serde_json::from_str(&json).unwrap();
         match deserialized {
             Response::Success { data } => assert!(data.is_none()),
@@ -213,9 +235,9 @@ mod tests {
         let data = serde_json::json!({"test": "value"});
         let response = Response::success_with_data(data.clone());
         let json = serde_json::to_string(&response).unwrap();
-        
+
         assert!(json.contains(r#""status":"Success""#));
-        
+
         let deserialized: Response = serde_json::from_str(&json).unwrap();
         match deserialized {
             Response::Success { data: Some(d) } => assert_eq!(d, data),
@@ -227,10 +249,10 @@ mod tests {
     fn test_error_response_serialization() {
         let response = Response::error("Test error");
         let json = serde_json::to_string(&response).unwrap();
-        
+
         assert!(json.contains(r#""status":"Error""#));
         assert!(json.contains(r#""message":"Test error""#));
-        
+
         let deserialized: Response = serde_json::from_str(&json).unwrap();
         match deserialized {
             Response::Error { message } => assert_eq!(message, "Test error"),
@@ -242,10 +264,10 @@ mod tests {
     fn test_not_found_response_serialization() {
         let response = Response::not_found("Plugin not found");
         let json = serde_json::to_string(&response).unwrap();
-        
+
         assert!(json.contains(r#""status":"NotFound""#));
         assert!(json.contains(r#""message":"Plugin not found""#));
-        
+
         let deserialized: Response = serde_json::from_str(&json).unwrap();
         match deserialized {
             Response::NotFound { message } => assert_eq!(message, "Plugin not found"),
@@ -262,10 +284,10 @@ mod tests {
             config: None,
             registered_at: Some(SystemTime::now()),
         };
-        
+
         let json = serde_json::to_string(&plugin).unwrap();
         assert!(json.contains("UTC"));
-        
+
         // Should deserialize without error
         let _: PluginInfo = serde_json::from_str(&json).unwrap();
     }
