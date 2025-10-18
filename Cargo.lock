@@ -470,6 +470,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-test",
+ "tracing",
 ]
 
 [[package]]

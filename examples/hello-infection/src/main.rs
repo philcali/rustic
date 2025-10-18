@@ -1,5 +1,5 @@
 use anyhow::Result;
-use pandemic_protocol::{PluginInfo, Request};
+use pandemic_protocol::PluginInfo;
 use pandemic_common::DaemonClient;
 use std::collections::HashMap;
 use std::env;
@@ -31,9 +31,11 @@ async fn main() -> Result<()> {
         registered_at: None,
     };
     
-    let request = Request::Register { plugin };
-    let response = DaemonClient::send_request(&args.socket_path, &request).await?;
-    info!("Registration response: {:?}", response);
+    let mut client = DaemonClient::connect(&args.socket_path).await?;
+    info!("Connected to daemon, registering and keeping connection alive...");
+
+    // This will register and keep the connection alive
+    client.register_and_keep_alive(plugin).await?;
     
     Ok(())
 }

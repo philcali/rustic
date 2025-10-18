@@ -52,6 +52,25 @@ pub enum Request {
     Deregister { name: String },
     ListPlugins,
     GetPlugin { name: String },
+    Subscribe { topics: Vec<String> },
+    Unsubscribe { topics: Vec<String> },
+    Publish { topic: String, data: serde_json::Value },
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum Message {
+    Request(Request),
+    Response(Response),
+    Event(Event),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Event {
+    pub topic: String,
+    pub source: String,
+    pub data: serde_json::Value,
+    pub timestamp: Option<SystemTime>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
