@@ -1,11 +1,12 @@
 use anyhow::Result;
 use clap::Parser;
-use pandemic_protocol::{Event, Message, PluginInfo, Request, Response};
+use pandemic_protocol::{Event, HealthMetrics, Message, PluginInfo, Request, Response};
 use serde_json::json;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
+use sysinfo::System;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{mpsc, Mutex};
@@ -90,6 +91,8 @@ struct Daemon {
     plugins: HashMap<String, PluginInfo>,
     event_bus: EventBus,
     connections: HashMap<String, ConnectionContext>, // connection_id -> context
+    start_time: SystemTime,
+    system: System,
 }
 
 impl Daemon {
@@ -98,6 +101,38 @@ impl Daemon {
             plugins: HashMap::new(),
             event_bus: EventBus::new(),
             connections: HashMap::new(),
+            start_time: SystemTime::now(),
+            system: System::new_all(),
+        }
+    }
+
+    fn collect_health_metrics(&mut self) -> HealthMetrics {
+        self.system.refresh_all();
+
+        let uptime = self
+            .start_time
+            .elapsed()
+            .unwrap_or(Duration::ZERO)
+            .as_secs();
+        let memory = self.system.total_memory() / 1024 / 1024; // Convert to MB
+        let memory_used = self.system.used_memory() / 1024 / 1024;
+
+        let cpu_usage = self.system.global_cpu_info().cpu_usage();
+        let load_avg = System::load_average();
+
+        HealthMetrics {
+            active_plugins: self.plugins.len(),
+            total_connections: self.connections.len(),
+            event_bus_subscribers: self.event_bus.subscribers.len(),
+            uptime_seconds: uptime,
+            memory_used_mb: memory_used,
+            memory_total_mb: memory,
+            cpu_usage_percent: cpu_usage,
+            load_average: if load_avg.one > 0.0 {
+                Some(load_avg.one as f32)
+            } else {
+                None
+            },
         }
     }
 
@@ -196,6 +231,10 @@ impl Daemon {
                 };
                 self.event_bus.publish(event, &self.connections);
                 Response::success()
+            }
+            Request::GetHealth => {
+                let health = self.collect_health_metrics();
+                Response::success_with_data(json!(health))
             }
         }
     }

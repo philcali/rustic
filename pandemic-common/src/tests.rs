@@ -48,6 +48,19 @@ mod client_tests {
                     Request::Publish { .. } => Response::success(),
                     Request::Unsubscribe { .. } => Response::success(),
                     Request::Subscribe { .. } => Response::success(),
+                    Request::GetHealth => {
+                        let health = serde_json::json!({
+                            "active_plugins": 1,
+                            "total_connections": 1,
+                            "event_bus_subscribers": 0,
+                            "uptime_seconds": 60,
+                            "memory_used_mb": 512,
+                            "memory_total_mb": 2048,
+                            "cpu_usage_percent": 25.5,
+                            "load_average": 1.2
+                        });
+                        Response::success_with_data(health)
+                    }
                 };
 
                 let response_json = serde_json::to_string(&response).unwrap();
@@ -161,6 +174,35 @@ mod client_tests {
 
         match response {
             Response::Success { .. } => {}
+            _ => panic!("Expected success response"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_get_health() {
+        let temp_dir = TempDir::new().unwrap();
+        let socket_path = temp_dir.path().join(format!(
+            "test_{}.sock",
+            COUNTER.fetch_add(1, Ordering::SeqCst)
+        ));
+        let socket_path_str = socket_path.to_str().unwrap();
+
+        tokio::spawn(mock_daemon_server(socket_path_str.to_string()));
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+        let request = Request::GetHealth;
+        let response = DaemonClient::send_request(&socket_path, &request)
+            .await
+            .unwrap();
+
+        match response {
+            Response::Success { data } => {
+                assert!(data.is_some());
+                let health_data = data.unwrap();
+                assert!(health_data["active_plugins"].is_number());
+                assert!(health_data["memory_used_mb"].is_number());
+                assert!(health_data["cpu_usage_percent"].is_number());
+            }
             _ => panic!("Expected success response"),
         }
     }
