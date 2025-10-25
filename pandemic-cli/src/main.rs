@@ -46,6 +46,8 @@ enum DaemonAction {
     },
     /// Check daemon status
     Status,
+    /// Get health metrics
+    Health,
 }
 
 #[derive(Subcommand)]
@@ -88,6 +90,7 @@ async fn daemon_command(socket_path: &PathBuf, action: DaemonAction) -> Result<(
             println!("Daemon is running at {:?}", socket_path);
             return Ok(());
         }
+        DaemonAction::Health => Request::GetHealth,
     };
 
     let response = DaemonClient::send_request(socket_path, &request).await?;

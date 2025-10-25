@@ -37,6 +37,21 @@ mod time_format {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HealthMetrics {
+    // Daemon metrics
+    pub active_plugins: usize,
+    pub total_connections: usize,
+    pub event_bus_subscribers: usize,
+    pub uptime_seconds: u64,
+
+    // System metrics
+    pub memory_used_mb: u64,
+    pub memory_total_mb: u64,
+    pub cpu_usage_percent: f32,
+    pub load_average: Option<f32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginInfo {
     pub name: String,
     pub version: String,
@@ -69,6 +84,7 @@ pub enum Request {
         topic: String,
         data: serde_json::Value,
     },
+    GetHealth,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
