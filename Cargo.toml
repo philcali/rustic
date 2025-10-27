@@ -5,7 +5,8 @@ members = [
     "pandemic-protocol",
     "pandemic-common",
     "examples/hello-infection",
-    "pandemic-udp"
+    "pandemic-udp",
+    "pandemic-rest"
 ]
 resolver = "2"
 
