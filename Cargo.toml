@@ -6,7 +6,8 @@ members = [
     "pandemic-common",
     "examples/hello-infection",
     "pandemic-udp",
-    "pandemic-rest"
+    "pandemic-rest",
+    "pandemic-console"
 ]
 resolver = "2"
 
