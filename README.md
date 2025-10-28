@@ -9,6 +9,7 @@ A lightweight daemon for managing "infection" plugins via Unix domain sockets.
 - **pandemic-cli**: Privileged tool for systemd service management
 - **pandemic-udp**: Launches a UDP server proxy to the daemon
 - **pandemic-rest**: HTTP REST API server for web-based access
+- **pandemic-console**: Web dashboard for monitoring and managing the daemon
 - **infections**: Plugin processes that register with the daemon
 
 ## Quick Start
@@ -55,6 +56,9 @@ docker run -p 8080:8080 -v /tmp/pandemic:/var/run/pandemic pandemic /usr/local/b
 
 # Run REST API server
 docker run -p 8080:8080 -v /tmp/pandemic:/var/run/pandemic pandemic /usr/local/bin/pandemic-rest
+
+# Run web console
+docker run -p 3000:3000 -v /tmp/pandemic:/var/run/pandemic pandemic /usr/local/bin/pandemic-console
 
 # Run example plugin
 docker run -v /tmp/pandemic:/var/run/pandemic pandemic /usr/local/bin/hello-infection
@@ -111,3 +115,21 @@ roles = ["admin"]
 [roles.admin]
 scopes = ["*"]
 ```
+
+## Web Console
+
+The pandemic-console provides a web-based dashboard:
+
+```bash
+# Start web console
+./target/debug/pandemic-console
+
+# Access dashboard
+open http://localhost:3000
+```
+
+### Features
+- Real-time system health monitoring
+- Plugin registry management
+- Responsive web interface
+- Configurable API endpoint and authentication
