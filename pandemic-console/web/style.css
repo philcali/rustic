@@ -31,6 +31,19 @@ header {
   align-items: center;
 }
 
+.status-indicators {
+  display: flex;
+  gap: 1rem;
+  align-items: center;
+}
+
+.status-indicators > div {
+  padding: 0.25rem 0.75rem;
+  border-radius: 4px;
+  font-size: 0.875rem;
+  font-weight: 500;
+}
+
 header h1 {
   font-size: 1.5rem;
   font-weight: 600;
@@ -38,12 +51,12 @@ header h1 {
 
 .status-connected {
   color: var(--success-color);
-  font-weight: 500;
+  background: #dcfce7;
 }
 
 .status-disconnected {
   color: var(--error-color);
-  font-weight: 500;
+  background: #fef2f2;
 }
 
 main {
@@ -159,6 +172,10 @@ button:hover {
 button:disabled {
   background: #94a3b8;
   cursor: not-allowed;
+}
+
+button + button {
+  margin-left: 0.5rem;
 }
 
 .loading {

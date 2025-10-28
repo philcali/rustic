@@ -90,19 +90,25 @@ async fn main() -> Result<()> {
         auth_config,
     };
 
-    // Build the router
-    let app = Router::new()
+    // Build the router with auth-protected routes
+    let protected_routes = Router::new()
         .route("/api/plugins", get(list_plugins))
         .route("/api/plugins/:name", get(get_plugin))
         .route("/api/plugins/:name", delete(deregister_plugin))
         .route("/api/health", get(get_health))
         .route("/api/events", post(publish_event))
-        .route("/api/events/stream", get(websocket_handler))
+        .layer(from_fn_with_state(state.clone(), auth_middleware));
+
+    // WebSocket route handles auth internally
+    let websocket_routes = Router::new().route("/api/events/stream", get(websocket_handler));
+
+    let app = Router::new()
+        .merge(protected_routes)
+        .merge(websocket_routes)
         .layer(
             ServiceBuilder::new()
                 .layer(TraceLayer::new_for_http())
-                .layer(CorsLayer::permissive())
-                .layer(from_fn_with_state(state.clone(), auth_middleware)),
+                .layer(CorsLayer::permissive()),
         )
         .with_state(state);
 
