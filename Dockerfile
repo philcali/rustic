@@ -13,6 +13,8 @@ FROM gcr.io/distroless/cc-debian12
 COPY --from=builder /app/target/release/pandemic /usr/local/bin/
 COPY --from=builder /app/target/release/pandemic-cli /usr/local/bin/
 COPY --from=builder /app/target/release/pandemic-udp /usr/local/bin/
+COPY --from=builder /app/target/release/pandemic-rest /usr/local/bin/
+COPY --from=builder /app/target/release/pandemic-console /usr/local/bin/
 COPY --from=builder /app/target/release/hello-infection /usr/local/bin/
 
 # Create runtime directory for sockets

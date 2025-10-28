@@ -10,7 +10,10 @@
     <div id="app">
       <header>
         <h1>🦠 Pandemic Console</h1>
-        <div id="connection-status" class="status-disconnected">Disconnected</div>
+        <div class="status-indicators">
+          <div id="connection-status" class="status-disconnected">API: Disconnected</div>
+          <div id="websocket-status" class="status-disconnected">Events: Disconnected</div>
+        </div>
       </header>
       
       <main>
@@ -57,6 +60,7 @@
               <input type="password" id="api-key" placeholder="Enter API key" />
             </div>
             <button id="connect-btn">Connect</button>
+            <button id="disconnect-btn" style="display: none;">Disconnect</button>
           </div>
         </section>
       </main>

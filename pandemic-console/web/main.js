@@ -5,6 +5,9 @@ class PandemicConsole {
     this.apiUrl = localStorage.getItem('pandemic-api-url') || 'http://localhost:8080';
     this.apiKey = localStorage.getItem('pandemic-api-key') || '';
     this.connected = false;
+    this.websocket = null;
+    this.reconnectAttempts = 0;
+    this.maxReconnectAttempts = 5;
     
     this.initializeElements();
     this.bindEvents();
@@ -18,6 +21,7 @@ class PandemicConsole {
   initializeElements() {
     this.elements = {
       connectionStatus: document.getElementById('connection-status'),
+      websocketStatus: document.getElementById('websocket-status'),
       activePlugins: document.getElementById('active-plugins'),
       memoryUsage: document.getElementById('memory-usage'),
       cpuUsage: document.getElementById('cpu-usage'),
@@ -25,12 +29,14 @@ class PandemicConsole {
       pluginsList: document.getElementById('plugins-list'),
       apiUrl: document.getElementById('api-url'),
       apiKey: document.getElementById('api-key'),
-      connectBtn: document.getElementById('connect-btn')
+      connectBtn: document.getElementById('connect-btn'),
+      disconnectBtn: document.getElementById('disconnect-btn')
     };
   }
 
   bindEvents() {
     this.elements.connectBtn.addEventListener('click', () => this.handleConnect());
+    this.elements.disconnectBtn.addEventListener('click', () => this.disconnect());
     this.elements.apiUrl.addEventListener('change', () => this.saveSettings());
     this.elements.apiKey.addEventListener('change', () => this.saveSettings());
   }
@@ -67,17 +73,22 @@ class PandemicConsole {
       await this.fetchHealth();
       
       this.connected = true;
-      this.updateConnectionStatus('Connected', 'status-connected');
+      this.updateConnectionStatus('API: Connected', 'status-connected');
+      this.elements.connectBtn.style.display = 'none';
+      this.elements.disconnectBtn.style.display = 'inline-block';
       
       // Load initial data
       await this.loadDashboard();
       
-      // Start periodic updates
+      // Connect WebSocket for real-time updates
+      this.connectWebSocket();
+      
+      // Start periodic updates (reduced frequency since we have WebSocket)
       this.startPeriodicUpdates();
       
     } catch (error) {
       this.connected = false;
-      this.updateConnectionStatus('Disconnected', 'status-disconnected');
+      this.updateConnectionStatus('API: Disconnected', 'status-disconnected');
       this.showError(`Connection failed: ${error.message}`);
     }
   }
@@ -85,6 +96,11 @@ class PandemicConsole {
   updateConnectionStatus(text, className) {
     this.elements.connectionStatus.textContent = text;
     this.elements.connectionStatus.className = className;
+  }
+
+  updateWebSocketStatus(text, className) {
+    this.elements.websocketStatus.textContent = text;
+    this.elements.websocketStatus.className = className;
   }
 
   async loadDashboard() {
@@ -185,19 +201,125 @@ class PandemicConsole {
     }
   }
 
+  connectWebSocket() {
+    if (this.websocket) {
+      this.websocket.close();
+    }
+
+    const wsUrl = this.apiUrl.replace('http://', 'ws://').replace('https://', 'wss://');
+    const wsEndpoint = `${wsUrl}/api/events/stream?token=${encodeURIComponent(this.apiKey)}&topics=plugin.*,health.*`;
+    
+    try {
+      this.websocket = new WebSocket(wsEndpoint);
+      
+      this.websocket.onopen = () => {
+        console.log('WebSocket connected');
+        this.reconnectAttempts = 0;
+        this.updateWebSocketStatus('Events: Connected', 'status-connected');
+      };
+      
+      this.websocket.onmessage = (event) => {
+        try {
+          const message = JSON.parse(event.data);
+          this.handleWebSocketMessage(message);
+        } catch (e) {
+          console.error('Failed to parse WebSocket message:', e);
+        }
+      };
+      
+      this.websocket.onclose = () => {
+        console.log('WebSocket disconnected');
+        this.websocket = null;
+        this.updateWebSocketStatus('Events: Disconnected', 'status-disconnected');
+        
+        // Attempt to reconnect
+        if (this.connected && this.reconnectAttempts < this.maxReconnectAttempts) {
+          this.reconnectAttempts++;
+          console.log(`Attempting to reconnect WebSocket (${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
+          this.updateWebSocketStatus('Events: Reconnecting...', 'status-disconnected');
+          setTimeout(() => this.connectWebSocket(), 2000 * this.reconnectAttempts);
+        }
+      };
+      
+      this.websocket.onerror = (error) => {
+        console.error('WebSocket error:', error);
+      };
+      
+    } catch (error) {
+      console.error('Failed to create WebSocket connection:', error);
+    }
+  }
+
+  handleWebSocketMessage(message) {
+    switch (message.type) {
+      case 'connected':
+        console.log('WebSocket subscription confirmed for topics:', message.topics);
+        break;
+        
+      case 'event':
+        this.handleRealtimeEvent(message.data);
+        break;
+        
+      case 'error':
+        console.error('WebSocket error:', message.message);
+        this.showError(`WebSocket error: ${message.message}`);
+        break;
+        
+      default:
+        console.log('Unknown WebSocket message type:', message.type);
+    }
+  }
+
+  handleRealtimeEvent(event) {
+    console.log('Received real-time event:', event);
+    
+    // Handle different event types
+    if (event.topic.startsWith('plugin.')) {
+      // Plugin-related events - refresh plugin list
+      this.loadPlugins();
+    }
+    
+    if (event.topic.startsWith('health.')) {
+      // Health-related events - refresh health metrics
+      this.loadHealth();
+    }
+    
+    // Could add event log display here in the future
+  }
+
   startPeriodicUpdates() {
-    // Update every 5 seconds
+    // Update every 30 seconds (reduced since WebSocket provides real-time updates)
     this.updateInterval = setInterval(() => {
       if (this.connected) {
         this.loadDashboard();
       }
-    }, 5000);
+    }, 30000);
   }
 
   showError(message) {
     // Simple error display - could be enhanced with a proper notification system
     console.error(message);
     alert(message);
+  }
+
+  disconnect() {
+    this.connected = false;
+    
+    if (this.websocket) {
+      this.websocket.close();
+      this.websocket = null;
+    }
+    
+    if (this.updateInterval) {
+      clearInterval(this.updateInterval);
+      this.updateInterval = null;
+    }
+    
+    this.updateConnectionStatus('API: Disconnected', 'status-disconnected');
+    this.updateWebSocketStatus('Events: Disconnected', 'status-disconnected');
+    
+    this.elements.connectBtn.style.display = 'inline-block';
+    this.elements.disconnectBtn.style.display = 'none';
   }
 }
 
