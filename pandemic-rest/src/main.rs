@@ -1,11 +1,13 @@
 mod auth;
+mod events;
 mod handlers;
 mod middleware;
+mod websocket;
 
 use anyhow::Result;
 use axum::{
     middleware::from_fn_with_state,
-    routing::{delete, get},
+    routing::{delete, get, post},
     Router,
 };
 use clap::Parser;
@@ -18,8 +20,10 @@ use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing::{error, info};
 
 use auth::AuthConfig;
+use events::publish_event;
 use handlers::{deregister_plugin, get_health, get_plugin, list_plugins, AppState};
 use middleware::auth_middleware;
+use websocket::websocket_handler;
 
 #[derive(Parser)]
 #[command(name = "pandemic-rest")]
@@ -92,6 +96,8 @@ async fn main() -> Result<()> {
         .route("/api/plugins/:name", get(get_plugin))
         .route("/api/plugins/:name", delete(deregister_plugin))
         .route("/api/health", get(get_health))
+        .route("/api/events", post(publish_event))
+        .route("/api/events/stream", get(websocket_handler))
         .layer(
             ServiceBuilder::new()
                 .layer(TraceLayer::new_for_http())
@@ -123,7 +129,7 @@ roles = ["reader"]
 scopes = ["*"]
 
 [roles.reader]
-scopes = ["plugins:read", "health:read"]
+scopes = ["plugins:read", "health:read", "events:subscribe"]
 "#;
 
     if let Some(parent) = path.parent() {
