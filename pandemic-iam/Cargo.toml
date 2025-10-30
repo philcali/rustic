@@ -1,0 +1,37 @@
+[package]
+name = "pandemic-iam"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "pandemic-iam"
+path = "src/main.rs"
+
+[dependencies]
+pandemic-protocol = { path = "../pandemic-protocol" }
+pandemic-common = { path = "../pandemic-common" }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+axum = { version = "0.7", features = ["ws"] }
+tower = "0.4"
+tower-http = { version = "0.5", features = ["trace"] }
+toml = "0.8"
+uuid = { version = "1.0", features = ["v4"] }
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+aws-config = "1.0"
+aws-sdk-rolesanywhere = "1.0"
+aws-credential-types = "1.0"
+aws-sigv4 = "1.0"
+aws-smithy-runtime-api = "1.0"
+reqwest = { version = "0.11", features = ["json", "rustls-tls"], default-features = false }
+rustls = "0.23"
+rustls-pemfile = "2.0"
+sha2 = "0.10"
+hmac = "0.12"
+hex = "0.4"
