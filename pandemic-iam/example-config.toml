@@ -1,0 +1,20 @@
+# Example pandemic-iam configuration
+# This demonstrates how to configure IAM Anywhere integration
+
+[server]
+host = "127.0.0.1"
+port = 8080
+
+[aws]
+# IAM Anywhere configuration
+certificate_path = "/etc/pandemic/certs/client.crt"
+private_key_path = "/etc/pandemic/certs/client.key"
+trust_anchor_arn = "arn:aws:rolesanywhere:us-east-1:123456789012:trust-anchor/12345678-1234-1234-1234-123456789012"
+profile_arn = "arn:aws:rolesanywhere:us-east-1:123456789012:profile/pandemic-profile"
+role_arn = "arn:aws:iam::123456789012:role/PandemicRole"
+
+# Role mappings for different services
+[role_mappings]
+"pandemic-daemon" = "arn:aws:iam::123456789012:role/PandemicDaemonRole"
+"pandemic-rest" = "arn:aws:iam::123456789012:role/PandemicRestRole"
+"default" = "arn:aws:iam::123456789012:role/PandemicDefaultRole"
