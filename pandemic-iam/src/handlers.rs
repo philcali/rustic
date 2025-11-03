@@ -27,10 +27,15 @@ pub async fn list_roles(headers: HeaderMap, State(state): State<AppState>) -> Re
         return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
     }
 
-    let roles: Vec<String> = state.config.roles.keys().cloned().collect();
-    let role_list = roles.join("\n");
+    let parts = state.config.aws.role_arn.split("/");
+    let role_name = parts.last().unwrap_or("");
 
-    (StatusCode::OK, [("Content-Type", "text/plain")], role_list).into_response()
+    (
+        StatusCode::OK,
+        [("Content-Type", "text/plain")],
+        role_name.to_string(),
+    )
+        .into_response()
 }
 
 // Get credentials for a specific role
@@ -44,7 +49,8 @@ pub async fn get_role_credentials(
     }
 
     // Check if role exists
-    if !state.config.roles.contains_key(&role_name) {
+    let configured_role = state.config.aws.role_arn.split("/").last().unwrap_or("");
+    if role_name != configured_role {
         return (StatusCode::NOT_FOUND, "Role not found").into_response();
     }
 

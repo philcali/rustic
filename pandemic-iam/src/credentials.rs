@@ -1,12 +1,15 @@
-use anyhow::Result;
-use chrono::{DateTime, Utc};
-use rustls::pki_types::CertificateDer;
-use rustls_pemfile::{certs, private_key};
-use serde::{Deserialize, Serialize};
-use std::io::BufReader;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+
+use crate::iam_anywhere::{CreateSessionRequest, CreateSessionResponse};
+use crate::signer::FileSigner;
+use crate::signing::{sign_request, SigningParams};
+use anyhow::{anyhow, Result};
+use chrono::{DateTime, Utc};
+use reqwest::header::HeaderMap;
+use serde::{Deserialize, Serialize};
 use tracing::{error, info};
+use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AwsCredentials {
@@ -111,77 +114,101 @@ impl CredentialManager {
         &self,
         config: &crate::config::AwsConfig,
     ) -> Result<AwsCredentials> {
-        info!(
-            "Calling IAM Anywhere CreateSession API for profile: {}",
-            config.profile_arn
-        );
+        // Load signer
+        let signer = FileSigner::new(&config.certificate_path, &config.private_key_path)?;
 
-        // Load certificate and private key
-        let cert_pem = tokio::fs::read(&config.certificate_path).await?;
-        let key_pem = tokio::fs::read(&config.private_key_path).await?;
-
-        let certs = certs(&mut BufReader::new(&cert_pem[..]))
-            .collect::<Result<Vec<CertificateDer>, _>>()?;
-        let key = private_key(&mut BufReader::new(&key_pem[..]))?
-            .ok_or_else(|| anyhow::anyhow!("No private key found"))?;
-
-        if certs.is_empty() {
-            return Err(anyhow::anyhow!("No certificates found"));
-        }
-
-        // Create TLS client config with client certificate
-        let mut client_config = rustls::ClientConfig::builder()
-            .with_root_certificates(rustls::RootCertStore::empty())
-            .with_client_auth_cert(certs, key)?;
-        client_config
-            .dangerous()
-            .set_certificate_verifier(Arc::new(crate::iam_anywhere::NoVerifier));
-
-        let client = reqwest::Client::builder()
-            .use_preconfigured_tls(client_config)
-            .build()?;
-
-        // Extract region from trust anchor ARN
+        // Extract region from trust anchor ARN if not provided
         let region = config
-            .trust_anchor_arn
-            .split(':')
-            .nth(3)
-            .ok_or_else(|| anyhow::anyhow!("Invalid trust anchor ARN format"))?;
-        let url = format!("https://rolesanywhere.{}.amazonaws.com/sessions", region);
+            .region
+            .clone()
+            .or(extract_region_from_arn(&config.trust_anchor_arn))
+            .unwrap_or_else(|| "us-east-1".to_string());
 
-        let request_body = serde_json::json!({
-            "profileArn": config.profile_arn,
-            "roleArn": config.role_arn,
-            "trustAnchorArn": config.trust_anchor_arn,
-            "durationSeconds": 3600
-        });
+        // Build endpoint URL
+        let endpoint = config
+            .endpoint
+            .clone()
+            .unwrap_or(format!("https://rolesanywhere.{}.amazonaws.com", region));
 
-        let response = client
-            .post(&url)
-            .header("Content-Type", "application/x-amz-json-1.1")
-            .header("X-Amz-Target", "RolesAnywhereService.CreateSession")
-            .json(&request_body)
-            .send()
-            .await?;
+        // Build URL with query parameters
+        let mut url = format!("{}/sessions", endpoint);
+        let params = [
+            ("profileArn", &config.profile_arn),
+            ("roleArn", &config.role_arn),
+            ("trustAnchorArn", &config.trust_anchor_arn),
+        ];
+
+        let query_string = params
+            .iter()
+            .map(|(k, v)| format!("{}={}", k, urlencoding::encode(v)))
+            .collect::<Vec<_>>()
+            .join("&");
+
+        url.push('?');
+        url.push_str(&query_string);
+
+        // Create request payload (only cert and duration)
+        let request = CreateSessionRequest {
+            duration_seconds: config.session_duration_seconds.unwrap_or(3600),
+            role_session_name: config.session_name.clone(),
+        };
+
+        // Create signed request
+        let client = reqwest::Client::new();
+        let body = serde_json::to_string(&request)?;
+
+        // Set up signing parameters
+        let signing_params = SigningParams::new(region.clone());
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "amz-sdk-invocation-id",
+            Uuid::new_v4().to_string().parse().unwrap(),
+        );
+        headers.insert("amz-sdk-request", "attempt=1; max=3".parse().unwrap());
+        headers.insert("content-type", "application/json".parse().unwrap());
+
+        // Sign the request
+        let serial_number = signer.get_serial_number()?;
+        sign_request(
+            "POST",
+            &url,
+            &mut headers,
+            &body,
+            &signing_params,
+            &signer.certificate_base64(),
+            &serial_number,
+            &signer,
+        )?;
+
+        let response = client.post(&url).headers(headers).body(body).send().await?;
 
         if !response.status().is_success() {
-            let error_text = response.text().await?;
-            return Err(anyhow::anyhow!("IAM Anywhere API error: {}", error_text));
+            return Err(anyhow!("Request failed with status: {}", response.status()));
         }
 
-        let session_response: crate::iam_anywhere::CreateSessionResponse = response.json().await?;
+        let session_response: CreateSessionResponse = response.json().await?;
+
+        if session_response.credential_set.is_empty() {
+            return Err(anyhow!("No credentials returned from CreateSession"));
+        }
+
+        let credentials = &session_response.credential_set[0].credentials;
 
         Ok(AwsCredentials {
-            access_key_id: session_response.credential_set.credentials.access_key_id,
-            secret_access_key: session_response
-                .credential_set
-                .credentials
-                .secret_access_key,
-            token: session_response.credential_set.credentials.session_token,
-            expiration: DateTime::parse_from_rfc3339(
-                &session_response.credential_set.credentials.expiration,
-            )?
-            .with_timezone(&Utc),
+            access_key_id: credentials.access_key_id.clone(),
+            secret_access_key: credentials.secret_access_key.clone(),
+            token: credentials.session_token.clone(),
+            expiration: DateTime::parse_from_rfc3339(&credentials.expiration)?.with_timezone(&Utc),
         })
+    }
+}
+
+fn extract_region_from_arn(arn: &str) -> Option<String> {
+    // ARN format: arn:aws:rolesanywhere:region:account:trust-anchor/id
+    let parts: Vec<&str> = arn.split(':').collect();
+    if parts.len() >= 4 {
+        Some(parts[3].to_string())
+    } else {
+        None
     }
 }

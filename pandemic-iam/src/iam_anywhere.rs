@@ -1,67 +1,30 @@
-use rustls::pki_types::CertificateDer;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CreateSessionResponse {
-    #[serde(rename = "credentialSet")]
-    pub credential_set: CredentialSet,
+    pub credential_set: Vec<CredentialSet>,
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CredentialSet {
     pub credentials: Credentials,
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Credentials {
-    #[serde(rename = "accessKeyId")]
     pub access_key_id: String,
-    #[serde(rename = "secretAccessKey")]
     pub secret_access_key: String,
-    #[serde(rename = "sessionToken")]
     pub session_token: String,
     pub expiration: String,
 }
 
-#[derive(Debug)]
-pub struct NoVerifier;
-
-impl rustls::client::danger::ServerCertVerifier for NoVerifier {
-    fn verify_server_cert(
-        &self,
-        _end_entity: &CertificateDer<'_>,
-        _intermediates: &[CertificateDer<'_>],
-        _server_name: &rustls::pki_types::ServerName<'_>,
-        _ocsp_response: &[u8],
-        _now: rustls::pki_types::UnixTime,
-    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-        Ok(rustls::client::danger::ServerCertVerified::assertion())
-    }
-
-    fn verify_tls12_signature(
-        &self,
-        _message: &[u8],
-        _cert: &CertificateDer<'_>,
-        _dss: &rustls::DigitallySignedStruct,
-    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
-    }
-
-    fn verify_tls13_signature(
-        &self,
-        _message: &[u8],
-        _cert: &CertificateDer<'_>,
-        _dss: &rustls::DigitallySignedStruct,
-    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
-    }
-
-    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        vec![
-            rustls::SignatureScheme::RSA_PKCS1_SHA256,
-            rustls::SignatureScheme::ECDSA_NISTP256_SHA256,
-            rustls::SignatureScheme::RSA_PSS_SHA256,
-            rustls::SignatureScheme::ED25519,
-        ]
-    }
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateSessionRequest {
+    pub duration_seconds: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role_session_name: Option<String>,
 }

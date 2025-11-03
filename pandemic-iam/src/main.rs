@@ -2,6 +2,8 @@ mod config;
 mod credentials;
 mod handlers;
 mod iam_anywhere;
+mod signer;
+mod signing;
 
 use anyhow::Result;
 use axum::{
@@ -74,8 +76,8 @@ async fn main() -> Result<()> {
 
     // Set up application state
     let state = AppState {
-        config: config.clone(),
         credential_manager: credential_manager.clone(),
+        config: config.clone(),
     };
 
     // Start credential refresh task
