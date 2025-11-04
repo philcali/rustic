@@ -239,30 +239,44 @@ WantedBy=multi-user.target
 
             std::fs::write("/etc/systemd/system/pandemic.service", service_content)?;
             Command::new("systemctl").args(["daemon-reload"]).status()?;
-            Command::new("systemctl").args(["enable", "pandemic"]).status()?;
+            Command::new("systemctl")
+                .args(["enable", "pandemic"])
+                .status()?;
             println!("Installed pandemic daemon service");
         }
         BootstrapAction::Uninstall => {
-            Command::new("systemctl").args(["stop", "pandemic"]).status()?;
-            Command::new("systemctl").args(["disable", "pandemic"]).status()?;
+            Command::new("systemctl")
+                .args(["stop", "pandemic"])
+                .status()?;
+            Command::new("systemctl")
+                .args(["disable", "pandemic"])
+                .status()?;
             std::fs::remove_file("/etc/systemd/system/pandemic.service")?;
             Command::new("systemctl").args(["daemon-reload"]).status()?;
             println!("Uninstalled pandemic daemon service");
         }
         BootstrapAction::Start => {
-            Command::new("systemctl").args(["start", "pandemic"]).status()?;
+            Command::new("systemctl")
+                .args(["start", "pandemic"])
+                .status()?;
             println!("Started pandemic daemon service");
         }
         BootstrapAction::Stop => {
-            Command::new("systemctl").args(["stop", "pandemic"]).status()?;
+            Command::new("systemctl")
+                .args(["stop", "pandemic"])
+                .status()?;
             println!("Stopped pandemic daemon service");
         }
         BootstrapAction::Restart => {
-            Command::new("systemctl").args(["restart", "pandemic"]).status()?;
+            Command::new("systemctl")
+                .args(["restart", "pandemic"])
+                .status()?;
             println!("Restarted pandemic daemon service");
         }
         BootstrapAction::Status => {
-            Command::new("systemctl").args(["status", "pandemic"]).status()?;
+            Command::new("systemctl")
+                .args(["status", "pandemic"])
+                .status()?;
         }
     }
     Ok(())
