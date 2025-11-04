@@ -28,6 +28,11 @@ enum Commands {
         #[command(subcommand)]
         action: ServiceAction,
     },
+    /// Bootstrap pandemic daemon service
+    Bootstrap {
+        #[command(subcommand)]
+        action: BootstrapAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -48,6 +53,26 @@ enum DaemonAction {
     Status,
     /// Get health metrics
     Health,
+}
+
+#[derive(Subcommand)]
+enum BootstrapAction {
+    /// Install pandemic daemon service
+    Install {
+        /// Path to pandemic daemon binary
+        #[arg(long, default_value = "/usr/local/bin/pandemic")]
+        binary_path: PathBuf,
+    },
+    /// Uninstall pandemic daemon service
+    Uninstall,
+    /// Start pandemic daemon service
+    Start,
+    /// Stop pandemic daemon service
+    Stop,
+    /// Restart pandemic daemon service
+    Restart,
+    /// Show pandemic daemon service status
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -188,6 +213,75 @@ WantedBy=multi-user.target
     Ok(())
 }
 
+fn bootstrap_command(action: BootstrapAction) -> Result<()> {
+    match action {
+        BootstrapAction::Install { binary_path } => {
+            let service_content = format!(
+                r#"[Unit]
+Description=Pandemic Daemon
+After=network.target
+
+[Service]
+Type=simple
+ExecStart={}
+Restart=always
+RestartSec=5
+User=pandemic
+Group=pandemic
+RuntimeDirectory=pandemic
+RuntimeDirectoryMode=0755
+
+[Install]
+WantedBy=multi-user.target
+"#,
+                binary_path.display()
+            );
+
+            std::fs::write("/etc/systemd/system/pandemic.service", service_content)?;
+            Command::new("systemctl").args(["daemon-reload"]).status()?;
+            Command::new("systemctl")
+                .args(["enable", "pandemic"])
+                .status()?;
+            println!("Installed pandemic daemon service");
+        }
+        BootstrapAction::Uninstall => {
+            Command::new("systemctl")
+                .args(["stop", "pandemic"])
+                .status()?;
+            Command::new("systemctl")
+                .args(["disable", "pandemic"])
+                .status()?;
+            std::fs::remove_file("/etc/systemd/system/pandemic.service")?;
+            Command::new("systemctl").args(["daemon-reload"]).status()?;
+            println!("Uninstalled pandemic daemon service");
+        }
+        BootstrapAction::Start => {
+            Command::new("systemctl")
+                .args(["start", "pandemic"])
+                .status()?;
+            println!("Started pandemic daemon service");
+        }
+        BootstrapAction::Stop => {
+            Command::new("systemctl")
+                .args(["stop", "pandemic"])
+                .status()?;
+            println!("Stopped pandemic daemon service");
+        }
+        BootstrapAction::Restart => {
+            Command::new("systemctl")
+                .args(["restart", "pandemic"])
+                .status()?;
+            println!("Restarted pandemic daemon service");
+        }
+        BootstrapAction::Status => {
+            Command::new("systemctl")
+                .args(["status", "pandemic"])
+                .status()?;
+        }
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
@@ -196,6 +290,7 @@ async fn main() -> Result<()> {
     match args.command {
         Commands::Daemon { action } => daemon_command(&args.socket_path, action).await?,
         Commands::Service { action } => service_command(action)?,
+        Commands::Bootstrap { action } => bootstrap_command(action)?,
     }
 
     Ok(())
