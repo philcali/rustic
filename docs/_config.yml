@@ -1,0 +1,16 @@
+title: Pandemic
+description: A lightweight daemon for managing "infection" plugins via Unix domain sockets
+url: https://philcali.github.io
+baseurl: /rustic
+
+theme: minima
+
+markdown: kramdown
+highlighter: rouge
+
+plugins:
+  - jekyll-feed
+  - jekyll-sitemap
+
+github:
+  repository_url: https://github.com/philcali/rustic
