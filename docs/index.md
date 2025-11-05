@@ -1,6 +1,6 @@
-# Pandemic
-
-A lightweight daemon for managing "infection" plugins via Unix domain sockets.
+---
+layout: default
+---
 
 ## Quick Install
 
