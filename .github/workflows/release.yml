@@ -1,0 +1,61 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target:
+          - x86_64-unknown-linux-gnu
+          - armv7-unknown-linux-gnueabihf
+          - aarch64-unknown-linux-gnu
+
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        targets: ${{ matrix.target }}
+    
+    - name: Install cross
+      run: cargo install cross --git https://github.com/cross-rs/cross
+    
+    - name: Build
+      run: cross build --release --target ${{ matrix.target }}
+    
+    - name: Package binaries
+      run: |
+        mkdir -p dist
+        tar -czf dist/pandemic-${{ matrix.target }}.tar.gz -C target/${{ matrix.target }}/release \
+          pandemic pandemic-cli pandemic-udp pandemic-rest pandemic-console pandemic-iam hello-infection
+    
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: pandemic-${{ matrix.target }}
+        path: dist/pandemic-${{ matrix.target }}.tar.gz
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+    - name: Download artifacts
+      uses: actions/download-artifact@v4
+    
+    - name: Create Release
+      uses: softprops/action-gh-release@v2
+      with:
+        files: |
+          pandemic-x86_64-unknown-linux-gnu/pandemic-x86_64-unknown-linux-gnu.tar.gz
+          pandemic-armv7-unknown-linux-gnueabihf/pandemic-armv7-unknown-linux-gnueabihf.tar.gz
+          pandemic-aarch64-unknown-linux-gnu/pandemic-aarch64-unknown-linux-gnu.tar.gz
+        generate_release_notes: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
