@@ -19,12 +19,12 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
-    - name: Update ctools
-      run: |
-        sudo apt-get update
-        sudo apt-get --assume-yes install gcc-14
-        sudo apt-get --assume-yes install clang
-    
+    - name: Install compiler
+      id: install_cc
+      uses: rlalik/setup-cpp-compiler@master
+      with:
+        compiler: latest
+
     - name: Install Rust
       uses: dtolnay/rust-toolchain@stable
       with:
@@ -34,6 +34,9 @@ jobs:
       run: cargo install cross --git https://github.com/cross-rs/cross
     
     - name: Build
+      env:
+        CC: ${{ steps.install_cc.outputs.cc }}
+        CXX: ${{ steps.install_cc.outputs.cxx }}
       run: cross build --release --target ${{ matrix.target }}
     
     - name: Package binaries
