@@ -16,7 +16,7 @@ impl FileSigner {
         // Load certificate
         let cert_pem = fs::read_to_string(cert_path)?;
         let mut cert_reader = cert_pem.as_bytes();
-        let cert_der = certs(&mut cert_reader)?;
+        let cert_der: Vec<_> = certs(&mut cert_reader).collect::<Result<Vec<_>, _>>()?;
 
         if cert_der.is_empty() {
             return Err(anyhow!("No certificate found"));
@@ -25,17 +25,18 @@ impl FileSigner {
         // Load private key
         let key_pem = fs::read_to_string(key_path)?;
         let mut key_reader = key_pem.as_bytes();
-        let private_keys = pkcs8_private_keys(&mut key_reader)?;
+        let private_keys: Vec<_> =
+            pkcs8_private_keys(&mut key_reader).collect::<Result<Vec<_>, _>>()?;
 
         if private_keys.is_empty() {
             return Err(anyhow!("No private key found"));
         }
 
         // Try to parse RSA private key
-        let rsa_key = RsaPrivateKey::from_pkcs8_der(&private_keys[0]).ok();
+        let rsa_key = RsaPrivateKey::from_pkcs8_der(private_keys[0].secret_pkcs8_der()).ok();
 
         Ok(FileSigner {
-            certificate_der: cert_der[0].clone(),
+            certificate_der: cert_der[0].as_ref().to_vec(),
             rsa_key,
         })
     }
