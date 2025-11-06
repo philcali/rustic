@@ -3,7 +3,7 @@ description: A lightweight daemon for managing "infection" plugins via Unix doma
 url: https://philcali.github.io
 baseurl: /rustic
 
-theme: hacker
+theme: jekyll-theme-hacker
 
 markdown: kramdown
 highlighter: rouge
