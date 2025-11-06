@@ -22,7 +22,7 @@ jobs:
     - name: Update ctools
       run: |
         sudo apt-get update
-        sudo apt-get remove --assume-yes gcc-*
+        sudo apt-get --assume-yes install gcc-14
         sudo apt-get --assume-yes install clang
     
     - name: Install Rust
