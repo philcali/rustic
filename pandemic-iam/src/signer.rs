@@ -25,7 +25,8 @@ impl FileSigner {
         // Load private key
         let key_pem = fs::read_to_string(key_path)?;
         let mut key_reader = key_pem.as_bytes();
-        let private_keys: Vec<_> = pkcs8_private_keys(&mut key_reader).collect::<Result<Vec<_>, _>>()?;
+        let private_keys: Vec<_> =
+            pkcs8_private_keys(&mut key_reader).collect::<Result<Vec<_>, _>>()?;
 
         if private_keys.is_empty() {
             return Err(anyhow!("No private key found"));
