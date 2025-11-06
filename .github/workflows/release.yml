@@ -18,6 +18,12 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
+
+    - name: Update ctools
+      run: |
+        apt-get update
+        apt-get remove --assume-yes gcc-9
+        apt-get --assume-yes install clang
     
     - name: Install Rust
       uses: dtolnay/rust-toolchain@stable
