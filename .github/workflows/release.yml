@@ -38,6 +38,8 @@ jobs:
 
     - name: Install dependencies
       run: |
+        sudo apt-get update
+        sudo apt-get install -y nodejs npm
         cargo install bindgen-cli
         cargo install cross --git https://github.com/cross-rs/cross
 
