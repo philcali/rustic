@@ -25,6 +25,12 @@ jobs:
       with:
         compiler: latest
 
+    - uses: actions/setup-node@v4
+      with:
+        node-version: '22'
+        cache: 'npm'
+        cache-dependency-path: 'pandemic-console/web/package-lock.json'
+
     - name: Install Rust
       uses: dtolnay/rust-toolchain@stable
       with:
@@ -32,8 +38,7 @@ jobs:
 
     - name: Install dependencies
       run: |
-        sudo apt-get update
-        sudo apt-get install -y nodejs npm
+        npm install
         cargo install bindgen-cli
         cargo install cross --git https://github.com/cross-rs/cross
 
