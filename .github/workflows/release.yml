@@ -19,12 +19,6 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
-    - name: Setup Node.js
-      uses: actions/setup-node@v4
-      with:
-        node-version: 'latest' # Installs the latest stable Node.js version
-        cache: 'npm' # Optional: Caches npm dependencies for faster installs
-
     - name: Install compiler
       id: install_cc
       uses: rlalik/setup-cpp-compiler@master
