@@ -45,10 +45,6 @@ jobs:
         cargo install bindgen-cli
         cargo install cross --git https://github.com/cross-rs/cross
 
-    - name: Install NPM dependencies
-      run: |
-        (cd src/pandemic-console/web && npm install)
-
     - name: Build
       env:
         CC: ${{ steps.install_cc.outputs.cc }}
