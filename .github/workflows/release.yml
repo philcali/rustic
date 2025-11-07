@@ -36,8 +36,10 @@ jobs:
       with:
         targets: ${{ matrix.target }}
 
-    - name: Install node dependencies
-      run: npm install
+    - name: Install node dependencies and build web assets
+      run: |
+        npm install
+        npm run build
       working-directory: pandemic-console/web
 
     - name: Install dependencies
