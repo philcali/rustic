@@ -104,6 +104,22 @@ enum ServiceAction {
         /// Service name
         name: String,
     },
+    /// Displays the service status
+    Status {
+        /// Service name
+        name: String,
+    },
+    /// View service logs
+    Logs {
+        /// Service name
+        name: String,
+        /// Follow log output
+        #[arg(short, long)]
+        follow: bool,
+        /// Number of lines to show
+        #[arg(short, long, default_value = "50")]
+        lines: u32,
+    },
 }
 
 async fn daemon_command(socket_path: &PathBuf, action: DaemonAction) -> Result<()> {
@@ -209,6 +225,16 @@ WantedBy=multi-user.target
                 .status()?;
             println!("Restarted service: pandemic-{}", name);
         }
+        ServiceAction::Status { name } => {
+            Command::new("systemctl")
+                .args(["status", &format!("pandemic-{}", name)])
+                .status()?;
+        }
+        ServiceAction::Logs {
+            name,
+            follow,
+            lines,
+        } => logs_command(&name, follow, lines)?,
     }
     Ok(())
 }
@@ -279,6 +305,24 @@ WantedBy=multi-user.target
                 .status()?;
         }
     }
+    Ok(())
+}
+
+fn logs_command(service: &str, follow: bool, lines: u32) -> Result<()> {
+    let service_name = if service.starts_with("pandemic") {
+        service.to_string()
+    } else {
+        format!("pandemic-{}", service)
+    };
+
+    let mut cmd = Command::new("journalctl");
+    cmd.args(["-u", &service_name, "-n", &lines.to_string()]);
+
+    if follow {
+        cmd.arg("-f");
+    }
+
+    cmd.status()?;
     Ok(())
 }
 

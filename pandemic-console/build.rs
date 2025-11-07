@@ -1,5 +1,5 @@
-use std::process::Command;
 use std::path::Path;
+use std::process::Command;
 
 fn main() {
     println!("cargo:rerun-if-changed=web/");
@@ -18,7 +18,10 @@ fn main() {
     {
         Ok(output) => {
             if !output.status.success() {
-                eprintln!("npm build failed: {}", String::from_utf8_lossy(&output.stderr));
+                eprintln!(
+                    "npm build failed: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
                 eprintln!("Using fallback web assets");
                 create_fallback_dist();
             } else {
@@ -38,6 +41,7 @@ fn create_fallback_dist() {
         "web/dist/index.html",
         r#"<!DOCTYPE html>
 <html><head><title>Pandemic Console</title></head>
-<body><h1>Pandemic Console</h1><p>Web interface not available</p></body></html>"#
-    ).unwrap();
+<body><h1>Pandemic Console</h1><p>Web interface not available</p></body></html>"#,
+    )
+    .unwrap();
 }
