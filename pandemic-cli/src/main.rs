@@ -120,6 +120,20 @@ enum ServiceAction {
         #[arg(short, long, default_value = "50")]
         lines: u32,
     },
+    /// Configure service arguments
+    Config {
+        /// Service name
+        name: String,
+        /// Show current configuration
+        #[arg(long)]
+        show: bool,
+        /// Reset to default configuration
+        #[arg(long)]
+        reset: bool,
+        /// Custom arguments to pass to the service
+        #[arg(last = true)]
+        args: Vec<String>,
+    },
 }
 
 async fn daemon_command(socket_path: &PathBuf, action: DaemonAction) -> Result<()> {
@@ -235,6 +249,12 @@ WantedBy=multi-user.target
             follow,
             lines,
         } => logs_command(&name, follow, lines)?,
+        ServiceAction::Config {
+            name,
+            show,
+            reset,
+            args,
+        } => service_config_command(&name, show, reset, args)?,
     }
     Ok(())
 }
@@ -323,6 +343,56 @@ fn logs_command(service: &str, follow: bool, lines: u32) -> Result<()> {
     }
 
     cmd.status()?;
+    Ok(())
+}
+
+fn service_config_command(name: &str, show: bool, reset: bool, args: Vec<String>) -> Result<()> {
+    let service_name = format!("pandemic-{}", name);
+    let override_dir = format!("/etc/systemd/system/{}.service.d", service_name);
+    let override_file = format!("{}/override.conf", override_dir);
+
+    if show {
+        if std::path::Path::new(&override_file).exists() {
+            let content = std::fs::read_to_string(&override_file)?;
+            println!("Current configuration for {}:", service_name);
+            println!("{}", content);
+        } else {
+            println!("No custom configuration for {}", service_name);
+        }
+        return Ok(());
+    }
+
+    if reset {
+        if std::path::Path::new(&override_dir).exists() {
+            std::fs::remove_dir_all(&override_dir)?;
+            Command::new("systemctl").args(["daemon-reload"]).status()?;
+            println!("Reset {} to default configuration", service_name);
+        } else {
+            println!("{} already using default configuration", service_name);
+        }
+        return Ok(());
+    }
+
+    if args.is_empty() {
+        eprintln!("No arguments provided. Use --show to view current config or --reset to restore defaults.");
+        return Ok(());
+    }
+
+    // Create override configuration
+    let binary_path = format!("/usr/local/bin/pandemic-{}", name);
+    let exec_start = format!("{} {}", binary_path, args.join(" "));
+
+    let override_content = format!("[Service]\nExecStart=\nExecStart={}\n", exec_start);
+
+    std::fs::create_dir_all(&override_dir)?;
+    std::fs::write(&override_file, override_content)?;
+
+    Command::new("systemctl").args(["daemon-reload"]).status()?;
+
+    println!("Updated {} configuration:", service_name);
+    println!("ExecStart={}", exec_start);
+    println!("Run 'systemctl restart {}' to apply changes", service_name);
+
     Ok(())
 }
 
