@@ -49,7 +49,7 @@ main() {
     
     # Create directories
     sudo mkdir -p /var/lib/pandemic /etc/pandemic
-    sudo chown pandemic:pandemic /var/lib/pandemic
+    sudo chown pandemic:pandemic /var/lib/pandemic /etc/pandemic
     
     echo "✅ Pandemic installed successfully!"
     echo ""
