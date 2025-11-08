@@ -1434,6 +1434,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "pandemic-proxy"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "pandemic-common",
+ "pandemic-protocol",
+ "serde",
+ "serde_json",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "pandemic-rest"
 version = "0.1.0"
 dependencies = [

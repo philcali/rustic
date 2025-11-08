@@ -8,7 +8,8 @@ members = [
     "pandemic-udp",
     "pandemic-rest",
     "pandemic-console",
-    "pandemic-iam"
+    "pandemic-iam",
+    "pandemic-proxy"
 ]
 resolver = "2"
 
