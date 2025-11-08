@@ -1,0 +1,9 @@
+[infection]
+name = "my-service"
+version = "1.0.0"
+description = "Example wrapped service"
+
+[runtime]
+command = ["./my-script.sh"]
+health_check = ["curl", "-f", "http://localhost:8080/health"]
+health_interval = 30
