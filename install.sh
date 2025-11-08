@@ -39,7 +39,7 @@ main() {
     curl -L "$url" | tar -xz
     
     # Install binaries
-    sudo cp pandemic pandemic-cli pandemic-udp pandemic-rest pandemic-console pandemic-iam "$INSTALL_DIR/"
+    sudo cp pandemic pandemic-* "$INSTALL_DIR/"
     sudo chmod +x "$INSTALL_DIR"/pandemic*
     
     # Create user and group

@@ -58,7 +58,7 @@ jobs:
       run: |
         mkdir -p dist
         tar -czf dist/pandemic-${{ matrix.target }}.tar.gz -C target/${{ matrix.target }}/release \
-          pandemic pandemic-cli pandemic-udp pandemic-rest pandemic-console pandemic-iam hello-infection
+          pandemic pandemic-* hello-infection
 
     - name: Upload artifacts
       uses: actions/upload-artifact@v4
