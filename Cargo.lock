@@ -1328,6 +1328,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "pandemic-agent"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "libc",
+ "pandemic-protocol",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "pandemic-cli"
 version = "0.1.0"
 dependencies = [

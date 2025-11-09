@@ -64,6 +64,9 @@ enum BootstrapAction {
         /// Path to pandemic daemon binary
         #[arg(long, default_value = "/usr/local/bin/pandemic")]
         binary_path: PathBuf,
+        /// Also install pandemic-agent for admin operations
+        #[arg(long)]
+        with_agent: bool,
     },
     /// Uninstall pandemic daemon service
     Uninstall,
