@@ -20,7 +20,15 @@ struct Args {
 #[serde(tag = "type")]
 enum AgentRequest {
     SystemdControl { action: String, service: String },
+    ListServices,
     GetCapabilities,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PandemicServiceSummary {
+    pub name: String,
+    pub description: String,
+    pub status: String,
 }
 
 #[tokio::main]
@@ -127,6 +135,15 @@ async fn handle_agent_request(request: AgentRequest) -> Response {
                 "capabilities": ["systemd", "service_management"]
             }))
         }
+        AgentRequest::ListServices => {
+            info!("Service list requested");
+            match list_pandemic_services().await {
+                Ok(services) => Response::success_with_data(serde_json::json!({
+                    "services": services
+                })),
+                Err(e) => Response::error(format!("Failed to list services: {}", e)),
+            }
+        }
         AgentRequest::SystemdControl { action, service } => {
             info!("Systemd control: {} {}", action, service);
 
@@ -162,6 +179,41 @@ async fn execute_systemctl(action: &str, service: &str) -> Result<String> {
     } else {
         Err(anyhow::anyhow!(
             "systemctl failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ))
+    }
+}
+
+async fn list_pandemic_services() -> Result<Vec<serde_json::Value>> {
+    let output = Command::new("systemctl")
+        .arg("--legend=false")
+        .arg("--plain")
+        .arg("list-units")
+        .arg("pandemic*")
+        .output()?;
+
+    if output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let services: Vec<serde_json::Value> = stdout
+            .lines()
+            .filter_map(|line| {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 4 {
+                    let summary = PandemicServiceSummary {
+                        name: parts[0].to_string(),
+                        description: parts[3..].join(" "),
+                        status: parts[2].to_string(),
+                    };
+                    Some(serde_json::json!(summary))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        Ok(services)
+    } else {
+        Err(anyhow::anyhow!(
+            "systemctl list-units failed: {}",
             String::from_utf8_lossy(&output.stderr)
         ))
     }

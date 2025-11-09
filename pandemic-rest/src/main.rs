@@ -11,7 +11,7 @@ use axum::{
     Router,
 };
 use clap::Parser;
-use pandemic_common::DaemonClient;
+use pandemic_common::{AgentStatus, DaemonClient};
 use pandemic_protocol::{PluginInfo, Request};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -21,8 +21,11 @@ use tracing::{error, info};
 
 use auth::AuthConfig;
 use events::publish_event;
-use handlers::{deregister_plugin, get_health, get_plugin, list_plugins, AppState};
+use handlers::{
+    deregister_plugin, get_admin_capabilities, get_health, get_plugin, list_plugins, AppState,
+};
 use middleware::auth_middleware;
+use std::sync::{Arc, Mutex};
 use websocket::websocket_handler;
 
 #[derive(Parser)]
@@ -88,6 +91,7 @@ async fn main() -> Result<()> {
     let state = AppState {
         socket_path: args.socket_path,
         auth_config,
+        agent_status: Arc::new(Mutex::new(AgentStatus::new())),
     };
 
     // Build the router with auth-protected routes
@@ -97,6 +101,7 @@ async fn main() -> Result<()> {
         .route("/api/plugins/:name", delete(deregister_plugin))
         .route("/api/health", get(get_health))
         .route("/api/events", post(publish_event))
+        .route("/api/admin/capabilities", get(get_admin_capabilities))
         .layer(from_fn_with_state(state.clone(), auth_middleware));
 
     // WebSocket route handles auth internally
