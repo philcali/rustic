@@ -7,6 +7,7 @@ edition = "2021"
 pandemic-protocol = { path = "../pandemic-protocol" }
 tokio = { workspace = true }
 serde_json = { workspace = true }
+serde = { workspace = true }
 anyhow = { workspace = true }
 toml = "0.8"
 tracing = { workspace = true }

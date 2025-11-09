@@ -4,10 +4,11 @@ use axum::{
     response::Json,
     Extension,
 };
-use pandemic_common::DaemonClient;
+use pandemic_common::{AgentStatus, DaemonClient};
 use pandemic_protocol::{Request, Response as PandemicResponse};
 use serde_json::{json, Value};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use crate::auth::AuthConfig;
 
@@ -15,6 +16,7 @@ use crate::auth::AuthConfig;
 pub struct AppState {
     pub socket_path: PathBuf,
     pub auth_config: AuthConfig,
+    pub agent_status: Arc<Mutex<AgentStatus>>,
 }
 
 pub type ApiResult = Result<Json<Value>, (StatusCode, Json<Value>)>;
@@ -151,4 +153,40 @@ pub async fn get_health(
             ),
         )),
     }
+}
+
+pub async fn get_admin_capabilities(
+    State(state): State<AppState>,
+    Extension(scopes): Extension<Vec<String>>,
+) -> ApiResult {
+    if !state.auth_config.authorize(&scopes, "admin") {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(json!({"status": "error", "message": "Insufficient permissions"})),
+        ));
+    }
+
+    let needs_refresh = {
+        let agent_status = state.agent_status.lock().unwrap();
+        agent_status.is_stale()
+    };
+
+    if needs_refresh {
+        let new_status = AgentStatus::refresh().await;
+        let mut agent_status = state.agent_status.lock().unwrap();
+        *agent_status = new_status;
+    }
+
+    let (available, capabilities) = {
+        let agent_status = state.agent_status.lock().unwrap();
+        (agent_status.available, agent_status.capabilities.clone())
+    };
+
+    Ok(Json(json!({
+        "status": "success",
+        "data": {
+            "agent_available": available,
+            "capabilities": capabilities
+        }
+    })))
 }
