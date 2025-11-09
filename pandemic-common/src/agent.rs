@@ -1,5 +1,5 @@
 use anyhow::Result;
-use pandemic_protocol::{Request, Response};
+use pandemic_protocol::{AgentMessage, AgentRequest, Response};
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -73,10 +73,11 @@ impl AgentClient {
         Ok(stream)
     }
 
-    pub async fn send_request(&self, request: &Request) -> Result<Response> {
+    pub async fn send_agent_request(&self, request: &AgentRequest) -> Result<Response> {
         let mut stream = self.connect().await?;
 
-        let request_json = serde_json::to_string(request)?;
+        let message = AgentMessage::Request(request.clone());
+        let request_json = serde_json::to_string(&message)?;
         stream.write_all(request_json.as_bytes()).await?;
         stream.write_all(b"\n").await?;
 
@@ -90,12 +91,20 @@ impl AgentClient {
     }
 
     pub async fn ping(&self) -> Result<Vec<String>> {
-        let request = Request::GetHealth;
-        let response = self.send_request(&request).await?;
+        let request = AgentRequest::GetCapabilities;
+        let response = self.send_agent_request(&request).await?;
 
         match response {
-            Response::Success { data: _ } => {
-                // For now, return basic capabilities if agent responds
+            Response::Success { data: Some(data) } => {
+                if let Some(capabilities) = data.get("capabilities") {
+                    if let Some(caps_array) = capabilities.as_array() {
+                        let caps: Vec<String> = caps_array
+                            .iter()
+                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                            .collect();
+                        return Ok(caps);
+                    }
+                }
                 Ok(vec!["systemd".to_string()])
             }
             _ => Err(anyhow::anyhow!("Agent ping failed")),

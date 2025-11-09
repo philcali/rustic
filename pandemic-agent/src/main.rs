@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::Parser;
-use pandemic_protocol::{Message, Request, Response};
+use pandemic_protocol::{AgentMessage, AgentRequest, Response};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::process::Command;
@@ -14,14 +14,6 @@ use tracing::{error, info, warn};
 struct Args {
     #[arg(long, default_value = "/var/run/pandemic/admin.sock")]
     socket_path: PathBuf,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(tag = "type")]
-enum AgentRequest {
-    SystemdControl { action: String, service: String },
-    ListServices,
-    GetCapabilities,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,8 +78,8 @@ async fn handle_connection(mut stream: UnixStream) -> Result<()> {
             continue;
         }
 
-        let response = match serde_json::from_str::<Message>(trimmed) {
-            Ok(Message::Request(request)) => handle_request(request).await,
+        let response = match serde_json::from_str::<AgentMessage>(trimmed) {
+            Ok(AgentMessage::Request(request)) => handle_agent_request(request).await,
             Ok(_) => Response::error("Expected request message"),
             Err(e) => {
                 warn!("Failed to parse message: {}", e);
@@ -105,36 +97,16 @@ async fn handle_connection(mut stream: UnixStream) -> Result<()> {
     Ok(())
 }
 
-async fn handle_request(request: Request) -> Response {
+async fn handle_agent_request(request: AgentRequest) -> Response {
     match request {
-        Request::GetHealth => {
+        AgentRequest::GetHealth => {
             info!("Health check requested");
             Response::success_with_data(serde_json::json!({
                 "status": "healthy",
                 "capabilities": ["systemd"]
             }))
         }
-        _ => {
-            // Try to parse as AgentRequest for agent-specific operations
-            if let Ok(agent_req) = serde_json::from_value::<AgentRequest>(
-                serde_json::to_value(&request).unwrap_or_default(),
-            ) {
-                handle_agent_request(agent_req).await
-            } else {
-                Response::error("Unsupported request type")
-            }
-        }
-    }
-}
 
-async fn handle_agent_request(request: AgentRequest) -> Response {
-    match request {
-        AgentRequest::GetCapabilities => {
-            info!("Capabilities requested");
-            Response::success_with_data(serde_json::json!({
-                "capabilities": ["systemd", "service_management"]
-            }))
-        }
         AgentRequest::ListServices => {
             info!("Service list requested");
             match list_pandemic_services().await {
@@ -144,6 +116,14 @@ async fn handle_agent_request(request: AgentRequest) -> Response {
                 Err(e) => Response::error(format!("Failed to list services: {}", e)),
             }
         }
+
+        AgentRequest::GetCapabilities => {
+            info!("Capabilities requested");
+            Response::success_with_data(serde_json::json!({
+                "capabilities": ["systemd", "service_management"]
+            }))
+        }
+
         AgentRequest::SystemdControl { action, service } => {
             info!("Systemd control: {} {}", action, service);
 
