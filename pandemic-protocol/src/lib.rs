@@ -87,12 +87,28 @@ pub enum Request {
     GetHealth,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum AgentRequest {
+    GetHealth,
+    GetCapabilities,
+    ListServices,
+    SystemdControl { action: String, service: String },
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum Message {
     Request(Request),
     Response(Response),
     Event(Event),
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum AgentMessage {
+    Request(AgentRequest),
+    Response(Response),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
