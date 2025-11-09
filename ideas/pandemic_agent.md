@@ -9,12 +9,12 @@ A dual-binary approach for privileged system management while maintaining pandem
 ### Dual Binary Design
 
 ```
-┌─────────────────┐    ┌──────────────────┐
-│ pandemic-daemon │    │ pandemic-agent   │
-│ (unprivileged)  │    │ (root)           │
+┌──────────────────┐    ┌──────────────────┐
+│ pandemic-daemon  │    │ pandemic-agent   │
+│ (unprivileged)   │    │ (root)           │
 │ pandemic:pandemic│    │ root:root        │
-│ user.sock       │    │ admin.sock       │
-└─────────────────┘    └──────────────────┘
+│ user.sock        │    │ admin.sock       │
+└──────────────────┘    └──────────────────┘
 ```
 
 ### Components

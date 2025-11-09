@@ -1,3 +1,4 @@
+mod agent;
 mod bootstrap;
 mod daemon;
 mod service;
@@ -34,6 +35,11 @@ enum Commands {
     Bootstrap {
         #[command(subcommand)]
         action: BootstrapAction,
+    },
+    /// Manage pandemic agent service
+    Agent {
+        #[command(subcommand)]
+        action: AgentAction,
     },
 }
 
@@ -77,6 +83,26 @@ enum BootstrapAction {
     /// Restart pandemic daemon service
     Restart,
     /// Show pandemic daemon service status
+    Status,
+}
+
+#[derive(Subcommand)]
+enum AgentAction {
+    /// Install pandemic agent service
+    Install {
+        /// Path to pandemic agent binary
+        #[arg(long, default_value = "/usr/local/bin/pandemic-agent")]
+        binary_path: PathBuf,
+    },
+    /// Uninstall pandemic agent service
+    Uninstall,
+    /// Start pandemic agent service
+    Start,
+    /// Stop pandemic agent service
+    Stop,
+    /// Restart pandemic agent service
+    Restart,
+    /// Show pandemic agent service status
     Status,
 }
 
@@ -152,6 +178,7 @@ async fn main() -> Result<()> {
         }
         Commands::Service { action } => service::handle_service_command(action)?,
         Commands::Bootstrap { action } => bootstrap::handle_bootstrap_command(action)?,
+        Commands::Agent { action } => agent::handle_agent_command(action)?,
     }
 
     Ok(())

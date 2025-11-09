@@ -1,7 +1,7 @@
 use anyhow::Result;
 use std::path::Path;
 
-use crate::{system, BootstrapAction};
+use crate::{agent, system, BootstrapAction};
 
 pub fn handle_bootstrap_command(action: BootstrapAction) -> Result<()> {
     match action {
@@ -42,30 +42,8 @@ WantedBy=multi-user.target
     system::install_service("pandemic", &service_content)?;
 
     if with_agent {
-        install_agent()?;
+        agent::install_agent(Path::new("/usr/local/bin/pandemic-agent"))?;
     }
 
-    Ok(())
-}
-
-fn install_agent() -> Result<()> {
-    let service_content = r#"[Unit]
-Description=Pandemic Agent (Privileged)
-After=network.target
-
-[Service]
-Type=simple
-ExecStart=/usr/local/bin/pandemic-agent
-Restart=always
-RestartSec=5
-User=root
-Group=root
-
-[Install]
-WantedBy=multi-user.target
-"#;
-
-    system::install_service("pandemic-agent", service_content)?;
-    println!("Installed pandemic-agent service");
     Ok(())
 }
