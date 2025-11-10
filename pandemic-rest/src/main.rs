@@ -22,7 +22,8 @@ use tracing::{error, info};
 use auth::AuthConfig;
 use events::publish_event;
 use handlers::{
-    deregister_plugin, get_admin_capabilities, get_health, get_plugin, list_plugins, AppState,
+    control_system_service, deregister_plugin, get_admin_capabilities, get_health, get_plugin,
+    get_system_service, list_plugins, list_system_services, AppState,
 };
 use middleware::auth_middleware;
 use std::sync::{Arc, Mutex};
@@ -101,6 +102,12 @@ async fn main() -> Result<()> {
         .route("/api/plugins/:name", delete(deregister_plugin))
         .route("/api/health", get(get_health))
         .route("/api/events", post(publish_event))
+        .route("/api/admin/services", get(list_system_services))
+        .route("/api/admin/services/:name", get(get_system_service))
+        .route(
+            "/api/admin/services/:name/action",
+            post(control_system_service),
+        )
         .route("/api/admin/capabilities", get(get_admin_capabilities))
         .layer(from_fn_with_state(state.clone(), auth_middleware));
 
