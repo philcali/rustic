@@ -126,3 +126,11 @@ impl PersistentClient {
         Ok(())
     }
 }
+
+impl Drop for PersistentClient {
+    fn drop(&mut self) {
+        // The UnixStream will be automatically closed when dropped,
+        // which will signal the daemon to clean up this connection
+        tracing::info!("PersistentClient connection dropped");
+    }
+}
