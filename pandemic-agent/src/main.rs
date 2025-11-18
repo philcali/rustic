@@ -2,6 +2,7 @@ use anyhow::Result;
 use clap::Parser;
 use pandemic_protocol::{AgentMessage, AgentRequest, Response};
 use serde::{Deserialize, Serialize};
+use std::ffi::CString;
 use std::path::PathBuf;
 use std::process::Command;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -14,6 +15,12 @@ use tracing::{error, info, warn};
 struct Args {
     #[arg(long, default_value = "/var/run/pandemic/admin.sock")]
     socket_path: PathBuf,
+
+    #[arg(long, default_value = "pandemic")]
+    user: String,
+
+    #[arg(long, default_value = "pandemic")]
+    group: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,8 +55,13 @@ async fn main() -> Result<()> {
     // Bind to Unix socket
     let listener = UnixListener::bind(&args.socket_path)?;
 
-    // Set socket permissions (root:root 600)
-    std::fs::set_permissions(&args.socket_path, std::fs::Permissions::from_mode(0o600))?;
+    // Set socket permissions and ownership
+    std::fs::set_permissions(&args.socket_path, std::fs::Permissions::from_mode(0o660))?;
+
+    // Change ownership to pandemic user so REST module can access it
+    if let Err(e) = set_socket_ownership(&args) {
+        warn!("Failed to set socket ownership: {}", e);
+    }
 
     info!("Agent listening on {:?}", args.socket_path);
 
@@ -213,4 +225,36 @@ trait PermissionsExt {
                 .permissions(),
         )
     }
+}
+
+fn set_socket_ownership(args: &Args) -> Result<()> {
+    let user_cstr = CString::new(args.user.as_bytes())?;
+    let group_cstr = CString::new(args.group.as_bytes())?;
+    let path_cstr = CString::new(args.socket_path.to_string_lossy().as_bytes())?;
+
+    // Get user info
+    let passwd = unsafe { libc::getpwnam(user_cstr.as_ptr()) };
+    if passwd.is_null() {
+        return Err(anyhow::anyhow!("User '{}' not found", args.user));
+    }
+    let uid = unsafe { (*passwd).pw_uid };
+
+    // Get group info
+    let group = unsafe { libc::getgrnam(group_cstr.as_ptr()) };
+    if group.is_null() {
+        return Err(anyhow::anyhow!("Group '{}' not found", args.group));
+    }
+    let gid = unsafe { (*group).gr_gid };
+
+    // Change ownership
+    let result = unsafe { libc::chown(path_cstr.as_ptr(), uid, gid) };
+    if result != 0 {
+        return Err(anyhow::anyhow!(
+            "chown failed: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+
+    info!("Socket ownership changed to {}:{}", args.user, args.group);
+    Ok(())
 }

@@ -3,7 +3,7 @@ use pandemic_protocol::{AgentMessage, AgentRequest, Response};
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
 const AGENT_SOCKET_PATH: &str = "/var/run/pandemic/admin.sock";
@@ -74,19 +74,21 @@ impl AgentClient {
     }
 
     pub async fn send_agent_request(&self, request: &AgentRequest) -> Result<Response> {
-        let mut stream = self.connect().await?;
+        let stream = self.connect().await?;
+        let mut buf_reader = BufReader::new(stream);
 
         let message = AgentMessage::Request(request.clone());
         let request_json = serde_json::to_string(&message)?;
-        stream.write_all(request_json.as_bytes()).await?;
-        stream.write_all(b"\n").await?;
+        buf_reader
+            .get_mut()
+            .write_all(request_json.as_bytes())
+            .await?;
+        buf_reader.get_mut().write_all(b"\n").await?;
 
-        let mut buffer = Vec::new();
-        stream.read_to_end(&mut buffer).await?;
+        let mut response_line = String::new();
+        buf_reader.read_line(&mut response_line).await?;
 
-        let response_str = String::from_utf8(buffer)?;
-        let response: Response = serde_json::from_str(&response_str)?;
-
+        let response: Response = serde_json::from_str(response_line.trim())?;
         Ok(response)
     }
 
