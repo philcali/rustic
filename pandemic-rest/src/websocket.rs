@@ -238,10 +238,10 @@ async fn handle_websocket(socket: WebSocket, state: AppState, topics: Vec<String
 
     // Signal all tasks to stop
     cancel_token.cancel();
-    
+
     // Wait for tasks to finish
     let _ = tokio::join!(ws_receiver_task, daemon_reader_task);
-    
+
     // The daemon_client will be dropped here, which should close the connection
     info!("WebSocket handler finished, daemon connection cleaned up");
 }
