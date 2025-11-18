@@ -10,6 +10,7 @@ use futures_util::{sink::SinkExt, stream::StreamExt};
 use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 use crate::handlers::AppState;
@@ -124,84 +125,123 @@ async fn handle_websocket(socket: WebSocket, state: AppState, topics: Vec<String
 
     // Create channels for handling WebSocket messages and daemon events
     let (ws_tx, mut ws_rx) = mpsc::unbounded_channel::<Message>();
+    let cancel_token = CancellationToken::new();
 
     // Task to handle incoming WebSocket messages (for future subscription management)
     let ws_sender = ws_tx.clone();
-    tokio::spawn(async move {
-        while let Some(msg) = receiver.next().await {
-            match msg {
-                Ok(Message::Text(text)) => {
-                    // Handle subscription management messages
-                    if let Ok(request) = serde_json::from_str::<serde_json::Value>(&text) {
-                        info!("Received WebSocket message: {}", request);
-                        // Future: handle subscribe/unsubscribe requests
+    let cancel_token_clone = cancel_token.clone();
+    let ws_receiver_task = tokio::spawn(async move {
+        tokio::select! {
+            _ = async {
+                while let Some(msg) = receiver.next().await {
+                    match msg {
+                        Ok(Message::Text(text)) => {
+                            // Handle subscription management messages
+                            if let Ok(request) = serde_json::from_str::<serde_json::Value>(&text) {
+                                info!("Received WebSocket message: {}", request);
+                                // Future: handle subscribe/unsubscribe requests
+                            }
+                        }
+                        Ok(Message::Close(_)) => {
+                            info!("WebSocket connection closed by client");
+                            break;
+                        }
+                        Ok(Message::Ping(data)) => {
+                            let _ = ws_sender.send(Message::Pong(data));
+                        }
+                        Err(e) => {
+                            warn!("WebSocket error: {}", e);
+                            break;
+                        }
+                        _ => {}
                     }
                 }
-                Ok(Message::Close(_)) => {
-                    info!("WebSocket connection closed by client");
-                    break;
-                }
-                Ok(Message::Ping(data)) => {
-                    let _ = ws_sender.send(Message::Pong(data));
-                }
-                Err(e) => {
-                    warn!("WebSocket error: {}", e);
-                    break;
-                }
-                _ => {}
+            } => {
+                info!("WebSocket receiver task finished");
+            }
+            _ = cancel_token_clone.cancelled() => {
+                info!("WebSocket receiver task cancelled");
             }
         }
+        cancel_token_clone.cancel();
     });
 
     // Task to read events from daemon and forward to WebSocket
     let ws_sender = ws_tx.clone();
-    tokio::spawn(async move {
-        loop {
-            match daemon_client.read_event().await {
-                Ok(Some(event)) => {
-                    let message = json!({
-                        "type": "event",
-                        "data": event
-                    });
+    let cancel_token_clone = cancel_token.clone();
+    let daemon_reader_task = tokio::spawn(async move {
+        tokio::select! {
+            _ = async {
+                loop {
+                    match daemon_client.read_event().await {
+                        Ok(Some(event)) => {
+                            let message = json!({
+                                "type": "event",
+                                "data": event
+                            });
 
-                    if ws_sender.send(Message::Text(message.to_string())).is_err() {
-                        info!("WebSocket channel closed, stopping event forwarding");
-                        break;
+                            if ws_sender.send(Message::Text(message.to_string())).is_err() {
+                                info!("WebSocket channel closed, stopping event forwarding");
+                                break;
+                            }
+                        }
+                        Ok(None) => {
+                            info!("Daemon connection closed");
+                            let _ = ws_sender.send(Message::Text(
+                                json!({
+                                    "type": "error",
+                                    "message": "Daemon connection closed"
+                                })
+                                .to_string(),
+                            ));
+                            break;
+                        }
+                        Err(e) => {
+                            error!("Error reading event from daemon: {}", e);
+                            let _ = ws_sender.send(Message::Text(
+                                json!({
+                                    "type": "error",
+                                    "message": format!("Error reading events: {}", e)
+                                })
+                                .to_string(),
+                            ));
+                            break;
+                        }
                     }
                 }
-                Ok(None) => {
-                    info!("Daemon connection closed");
-                    let _ = ws_sender.send(Message::Text(
-                        json!({
-                            "type": "error",
-                            "message": "Daemon connection closed"
-                        })
-                        .to_string(),
-                    ));
-                    break;
-                }
-                Err(e) => {
-                    error!("Error reading event from daemon: {}", e);
-                    let _ = ws_sender.send(Message::Text(
-                        json!({
-                            "type": "error",
-                            "message": format!("Error reading events: {}", e)
-                        })
-                        .to_string(),
-                    ));
-                    break;
-                }
+            } => {
+                info!("Daemon reader task finished");
+            }
+            _ = cancel_token_clone.cancelled() => {
+                info!("Daemon reader task cancelled");
             }
         }
+        cancel_token_clone.cancel();
     });
 
     // Main loop to send messages to WebSocket client
-    while let Some(message) = ws_rx.recv().await {
-        if sender.send(message).await.is_err() {
-            info!("WebSocket connection closed");
-            break;
+    tokio::select! {
+        _ = async {
+            while let Some(message) = ws_rx.recv().await {
+                if sender.send(message).await.is_err() {
+                    info!("WebSocket connection closed");
+                    break;
+                }
+            }
+        } => {
+            info!("WebSocket sender finished");
+        }
+        _ = cancel_token.cancelled() => {
+            info!("WebSocket sender cancelled");
         }
     }
 
-    info!("WebSocket handler finished");
+    // Signal all tasks to stop
+    cancel_token.cancel();
+
+    // Wait for tasks to finish
+    let _ = tokio::join!(ws_receiver_task, daemon_reader_task);
+
+    // The daemon_client will be dropped here, which should close the connection
+    info!("WebSocket handler finished, daemon connection cleaned up");
 }
