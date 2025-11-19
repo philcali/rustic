@@ -1,33 +1,30 @@
+mod handlers;
+mod socket;
+mod systemd;
+
 use anyhow::Result;
 use clap::Parser;
-use pandemic_protocol::{AgentMessage, AgentRequest, Response};
-use serde::{Deserialize, Serialize};
-use std::ffi::CString;
+use pandemic_protocol::{AgentMessage, Response};
 use std::path::PathBuf;
-use std::process::Command;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tracing::{error, info, warn};
 
+use handlers::handle_agent_request;
+use socket::setup_socket_permissions;
+
 #[derive(Parser)]
 #[command(name = "pandemic-agent")]
 #[command(about = "Privileged agent for pandemic system management")]
-struct Args {
+pub struct Args {
     #[arg(long, default_value = "/var/run/pandemic/admin.sock")]
-    socket_path: PathBuf,
+    pub socket_path: PathBuf,
 
     #[arg(long, default_value = "pandemic")]
-    user: String,
+    pub user: String,
 
     #[arg(long, default_value = "pandemic")]
-    group: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct PandemicServiceSummary {
-    pub name: String,
-    pub description: String,
-    pub status: String,
+    pub group: String,
 }
 
 #[tokio::main]
@@ -56,12 +53,7 @@ async fn main() -> Result<()> {
     let listener = UnixListener::bind(&args.socket_path)?;
 
     // Set socket permissions and ownership
-    std::fs::set_permissions(&args.socket_path, std::fs::Permissions::from_mode(0o660))?;
-
-    // Change ownership to pandemic user so REST module can access it
-    if let Err(e) = set_socket_ownership(&args) {
-        warn!("Failed to set socket ownership: {}", e);
-    }
+    setup_socket_permissions(&args)?;
 
     info!("Agent listening on {:?}", args.socket_path);
 
@@ -106,155 +98,5 @@ async fn handle_connection(mut stream: UnixStream) -> Result<()> {
         line.clear();
     }
 
-    Ok(())
-}
-
-async fn handle_agent_request(request: AgentRequest) -> Response {
-    match request {
-        AgentRequest::GetHealth => {
-            info!("Health check requested");
-            Response::success_with_data(serde_json::json!({
-                "status": "healthy",
-                "capabilities": ["systemd"]
-            }))
-        }
-
-        AgentRequest::ListServices => {
-            info!("Service list requested");
-            match list_pandemic_services().await {
-                Ok(services) => Response::success_with_data(serde_json::json!({
-                    "services": services
-                })),
-                Err(e) => Response::error(format!("Failed to list services: {}", e)),
-            }
-        }
-
-        AgentRequest::GetCapabilities => {
-            info!("Capabilities requested");
-            Response::success_with_data(serde_json::json!({
-                "capabilities": ["systemd", "service_management"]
-            }))
-        }
-
-        AgentRequest::SystemdControl { action, service } => {
-            info!("Systemd control: {} {}", action, service);
-
-            let result = match action.as_str() {
-                "start" | "stop" | "restart" | "enable" | "disable" | "status" => {
-                    execute_systemctl(&action, &service).await
-                }
-                _ => {
-                    return Response::error("Invalid systemd action");
-                }
-            };
-
-            match result {
-                Ok(output) => Response::success_with_data(serde_json::json!({
-                    "action": action,
-                    "service": service,
-                    "output": output
-                })),
-                Err(e) => Response::error(format!("Systemd operation failed: {}", e)),
-            }
-        }
-    }
-}
-
-async fn execute_systemctl(action: &str, service: &str) -> Result<String> {
-    let output = Command::new("systemctl")
-        .arg(action)
-        .arg(service)
-        .output()?;
-
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
-    } else {
-        Err(anyhow::anyhow!(
-            "systemctl failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ))
-    }
-}
-
-async fn list_pandemic_services() -> Result<Vec<serde_json::Value>> {
-    let output = Command::new("systemctl")
-        .arg("--legend=false")
-        .arg("--plain")
-        .arg("list-units")
-        .arg("pandemic*")
-        .output()?;
-
-    if output.status.success() {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let services: Vec<serde_json::Value> = stdout
-            .lines()
-            .filter_map(|line| {
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() >= 4 {
-                    let summary = PandemicServiceSummary {
-                        name: parts[0].to_string(),
-                        description: parts[3..].join(" "),
-                        status: parts[2].to_string(),
-                    };
-                    Some(serde_json::json!(summary))
-                } else {
-                    None
-                }
-            })
-            .collect();
-        Ok(services)
-    } else {
-        Err(anyhow::anyhow!(
-            "systemctl list-units failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ))
-    }
-}
-
-#[cfg(target_os = "linux")]
-use std::os::unix::fs::PermissionsExt;
-
-#[cfg(not(target_os = "linux"))]
-trait PermissionsExt {
-    fn from_mode(_mode: u32) -> std::fs::Permissions {
-        std::fs::Permissions::from(
-            std::fs::File::open("/dev/null")
-                .unwrap()
-                .metadata()
-                .unwrap()
-                .permissions(),
-        )
-    }
-}
-
-fn set_socket_ownership(args: &Args) -> Result<()> {
-    let user_cstr = CString::new(args.user.as_bytes())?;
-    let group_cstr = CString::new(args.group.as_bytes())?;
-    let path_cstr = CString::new(args.socket_path.to_string_lossy().as_bytes())?;
-
-    // Get user info
-    let passwd = unsafe { libc::getpwnam(user_cstr.as_ptr()) };
-    if passwd.is_null() {
-        return Err(anyhow::anyhow!("User '{}' not found", args.user));
-    }
-    let uid = unsafe { (*passwd).pw_uid };
-
-    // Get group info
-    let group = unsafe { libc::getgrnam(group_cstr.as_ptr()) };
-    if group.is_null() {
-        return Err(anyhow::anyhow!("Group '{}' not found", args.group));
-    }
-    let gid = unsafe { (*group).gr_gid };
-
-    // Change ownership
-    let result = unsafe { libc::chown(path_cstr.as_ptr(), uid, gid) };
-    if result != 0 {
-        return Err(anyhow::anyhow!(
-            "chown failed: {}",
-            std::io::Error::last_os_error()
-        ));
-    }
-
-    info!("Socket ownership changed to {}:{}", args.user, args.group);
     Ok(())
 }
