@@ -93,7 +93,70 @@ pub enum AgentRequest {
     GetHealth,
     GetCapabilities,
     ListServices,
-    SystemdControl { action: String, service: String },
+    SystemdControl {
+        action: String,
+        service: String,
+    },
+
+    // User management
+    UserCreate {
+        username: String,
+        config: UserConfig,
+    },
+    UserDelete {
+        username: String,
+    },
+    UserModify {
+        username: String,
+        config: UserConfig,
+    },
+    ListUsers,
+
+    // Group management
+    GroupCreate {
+        groupname: String,
+    },
+    GroupDelete {
+        groupname: String,
+    },
+    GroupAddUser {
+        groupname: String,
+        username: String,
+    },
+    GroupRemoveUser {
+        groupname: String,
+        username: String,
+    },
+    ListGroups,
+
+    // Service configuration
+    ServiceConfigOverride {
+        service: String,
+        overrides: ServiceOverrides,
+    },
+    ServiceConfigReset {
+        service: String,
+    },
+    GetServiceConfig {
+        service: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserConfig {
+    pub shell: Option<String>,
+    pub home_dir: Option<String>,
+    pub groups: Option<Vec<String>>,
+    pub system_user: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceOverrides {
+    pub environment: Option<HashMap<String, String>>,
+    pub exec_start: Option<String>,
+    pub restart: Option<String>,
+    pub user: Option<String>,
+    pub group: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

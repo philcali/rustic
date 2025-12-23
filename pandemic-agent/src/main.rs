@@ -1,6 +1,7 @@
 mod handlers;
 mod socket;
 mod systemd;
+mod users;
 
 use anyhow::Result;
 use clap::Parser;

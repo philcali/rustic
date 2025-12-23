@@ -1,4 +1,5 @@
 use anyhow::Result;
+use pandemic_protocol::ServiceOverrides;
 use std::process::Command;
 
 use crate::handlers::PandemicServiceSummary;
@@ -52,4 +53,44 @@ pub async fn list_pandemic_services() -> Result<Vec<serde_json::Value>> {
             String::from_utf8_lossy(&output.stderr)
         ))
     }
+}
+
+pub async fn set_service_override(
+    service: &str,
+    overrides: &ServiceOverrides,
+) -> anyhow::Result<()> {
+    let override_dir = format!("/etc/systemd/system/{}.service.d", service);
+    std::fs::create_dir_all(&override_dir)?;
+
+    let override_file = format!("{}/pandemic-override.conf", override_dir);
+    let mut content = String::from("[Service]\n");
+
+    if let Some(user) = &overrides.user {
+        content.push_str(&format!("User={}\n", user));
+    }
+    if let Some(group) = &overrides.group {
+        content.push_str(&format!("Group={}\n", group));
+    }
+    if let Some(restart) = &overrides.restart {
+        content.push_str(&format!("Restart={}\n", restart));
+    }
+    if let Some(exec_start) = &overrides.exec_start {
+        content.push_str("ExecStart=\n");
+        content.push_str(&format!("ExecStart={}\n", exec_start));
+    }
+    if let Some(env) = &overrides.environment {
+        for (key, value) in env {
+            content.push_str(&format!("Environment={}={}\n", key, value));
+        }
+    }
+
+    std::fs::write(&override_file, content)?;
+
+    // Reload systemd
+    let status = Command::new("systemctl").arg("daemon-reload").status()?;
+    if !status.success() {
+        return Err(anyhow::anyhow!("systemctl daemon-reload failed"));
+    }
+
+    Ok(())
 }
