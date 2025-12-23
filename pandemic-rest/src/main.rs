@@ -22,8 +22,11 @@ use tracing::{error, info};
 use auth::AuthConfig;
 use events::publish_event;
 use handlers::{
-    control_system_service, deregister_plugin, get_admin_capabilities, get_health, get_plugin,
-    get_system_service, list_plugins, list_system_services, AppState,
+    add_user_to_group, control_system_service, create_group, create_user, delete_group,
+    delete_user, deregister_plugin, get_admin_capabilities, get_health, get_plugin,
+    get_service_config, get_system_service, list_groups, list_plugins, list_system_services,
+    list_users, modify_user, remove_user_from_group, reset_service_config, set_service_config,
+    AppState,
 };
 use middleware::auth_middleware;
 use std::sync::{Arc, Mutex};
@@ -109,6 +112,29 @@ async fn main() -> Result<()> {
             post(control_system_service),
         )
         .route("/api/admin/capabilities", get(get_admin_capabilities))
+        // Admin user management routes
+        .route("/api/admin/users", post(create_user).get(list_users))
+        .route(
+            "/api/admin/users/:username",
+            delete(delete_user).put(modify_user),
+        )
+        // Admin group management routes
+        .route("/api/admin/groups", get(list_groups))
+        .route(
+            "/api/admin/groups/:groupname",
+            post(create_group).delete(delete_group),
+        )
+        .route(
+            "/api/admin/groups/:groupname/users/:username",
+            post(add_user_to_group).delete(remove_user_from_group),
+        )
+        // Admin service configuration routes
+        .route(
+            "/api/admin/services/:service/config",
+            get(get_service_config)
+                .put(set_service_config)
+                .delete(reset_service_config),
+        )
         .layer(from_fn_with_state(state.clone(), auth_middleware));
 
     // WebSocket route handles auth internally
