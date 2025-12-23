@@ -6,7 +6,9 @@ use axum::{
     Extension,
 };
 use pandemic_common::{AgentClient, AgentStatus, DaemonClient};
-use pandemic_protocol::{AgentRequest, Request, Response as PandemicResponse};
+use pandemic_protocol::{
+    AgentRequest, Request, Response as PandemicResponse, ServiceOverrides, UserConfig,
+};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::path::PathBuf;
@@ -180,6 +182,180 @@ pub async fn control_system_service(
         service: name,
     };
 
+    let agent_client = AgentClient::default();
+    let response = agent_client.send_agent_request(&request);
+    format_pandemic_response(response.await)
+}
+
+// User management handlers
+pub async fn list_users(
+    State(state): State<AppState>,
+    Extension(scopes): Extension<Vec<String>>,
+) -> ApiResult {
+    require_scope!(&state.auth_config, &scopes, "admin");
+
+    let request = AgentRequest::ListUsers;
+    let agent_client = AgentClient::default();
+    let response = agent_client.send_agent_request(&request);
+    format_pandemic_response(response.await)
+}
+
+pub async fn create_user(
+    State(state): State<AppState>,
+    Extension(scopes): Extension<Vec<String>>,
+    Json(payload): Json<CreateUserPayload>,
+) -> ApiResult {
+    require_scope!(&state.auth_config, &scopes, "admin");
+
+    let request = AgentRequest::UserCreate {
+        username: payload.username,
+        config: payload.config,
+    };
+    let agent_client = AgentClient::default();
+    let response = agent_client.send_agent_request(&request);
+    format_pandemic_response(response.await)
+}
+
+#[derive(serde::Deserialize)]
+pub struct CreateUserPayload {
+    username: String,
+    config: UserConfig,
+}
+
+pub async fn delete_user(
+    State(state): State<AppState>,
+    Path(username): Path<String>,
+    Extension(scopes): Extension<Vec<String>>,
+) -> ApiResult {
+    require_scope!(&state.auth_config, &scopes, "admin");
+
+    let request = AgentRequest::UserDelete { username };
+    let agent_client = AgentClient::default();
+    let response = agent_client.send_agent_request(&request);
+    format_pandemic_response(response.await)
+}
+
+pub async fn modify_user(
+    State(state): State<AppState>,
+    Path(username): Path<String>,
+    Extension(scopes): Extension<Vec<String>>,
+    Json(config): Json<UserConfig>,
+) -> ApiResult {
+    require_scope!(&state.auth_config, &scopes, "admin");
+
+    let request = AgentRequest::UserModify { username, config };
+    let agent_client = AgentClient::default();
+    let response = agent_client.send_agent_request(&request);
+    format_pandemic_response(response.await)
+}
+
+// Group management handlers
+pub async fn list_groups(
+    State(state): State<AppState>,
+    Extension(scopes): Extension<Vec<String>>,
+) -> ApiResult {
+    require_scope!(&state.auth_config, &scopes, "admin");
+
+    let request = AgentRequest::ListGroups;
+    let agent_client = AgentClient::default();
+    let response = agent_client.send_agent_request(&request);
+    format_pandemic_response(response.await)
+}
+
+pub async fn create_group(
+    State(state): State<AppState>,
+    Path(groupname): Path<String>,
+    Extension(scopes): Extension<Vec<String>>,
+) -> ApiResult {
+    require_scope!(&state.auth_config, &scopes, "admin");
+
+    let request = AgentRequest::GroupCreate { groupname };
+    let agent_client = AgentClient::default();
+    let response = agent_client.send_agent_request(&request);
+    format_pandemic_response(response.await)
+}
+
+pub async fn delete_group(
+    State(state): State<AppState>,
+    Path(groupname): Path<String>,
+    Extension(scopes): Extension<Vec<String>>,
+) -> ApiResult {
+    require_scope!(&state.auth_config, &scopes, "admin");
+
+    let request = AgentRequest::GroupDelete { groupname };
+    let agent_client = AgentClient::default();
+    let response = agent_client.send_agent_request(&request);
+    format_pandemic_response(response.await)
+}
+
+pub async fn add_user_to_group(
+    State(state): State<AppState>,
+    Path((groupname, username)): Path<(String, String)>,
+    Extension(scopes): Extension<Vec<String>>,
+) -> ApiResult {
+    require_scope!(&state.auth_config, &scopes, "admin");
+
+    let request = AgentRequest::GroupAddUser {
+        groupname,
+        username,
+    };
+    let agent_client = AgentClient::default();
+    let response = agent_client.send_agent_request(&request);
+    format_pandemic_response(response.await)
+}
+
+pub async fn remove_user_from_group(
+    State(state): State<AppState>,
+    Path((groupname, username)): Path<(String, String)>,
+    Extension(scopes): Extension<Vec<String>>,
+) -> ApiResult {
+    require_scope!(&state.auth_config, &scopes, "admin");
+
+    let request = AgentRequest::GroupRemoveUser {
+        groupname,
+        username,
+    };
+    let agent_client = AgentClient::default();
+    let response = agent_client.send_agent_request(&request);
+    format_pandemic_response(response.await)
+}
+
+// Service configuration handlers
+pub async fn get_service_config(
+    State(state): State<AppState>,
+    Path(service): Path<String>,
+    Extension(scopes): Extension<Vec<String>>,
+) -> ApiResult {
+    require_scope!(&state.auth_config, &scopes, "admin");
+
+    let request = AgentRequest::GetServiceConfig { service };
+    let agent_client = AgentClient::default();
+    let response = agent_client.send_agent_request(&request);
+    format_pandemic_response(response.await)
+}
+
+pub async fn set_service_config(
+    State(state): State<AppState>,
+    Path(service): Path<String>,
+    Extension(scopes): Extension<Vec<String>>,
+    Json(overrides): Json<ServiceOverrides>,
+) -> ApiResult {
+    require_scope!(&state.auth_config, &scopes, "admin");
+
+    let request = AgentRequest::ServiceConfigOverride { service, overrides };
+    let agent_client = AgentClient::default();
+    let response = agent_client.send_agent_request(&request);
+    format_pandemic_response(response.await)
+}
+
+pub async fn reset_service_config(
+    State(state): State<AppState>,
+    Path(service): Path<String>,
+    Extension(scopes): Extension<Vec<String>>,
+) -> ApiResult {
+    require_scope!(&state.auth_config, &scopes, "admin");
+
+    let request = AgentRequest::ServiceConfigReset { service };
     let agent_client = AgentClient::default();
     let response = agent_client.send_agent_request(&request);
     format_pandemic_response(response.await)
