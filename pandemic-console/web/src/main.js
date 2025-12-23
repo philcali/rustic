@@ -51,11 +51,40 @@ class PandemicConsole {
                             <span>Agent Status: <span id="agent-status">Unknown</span></span>
                             <span>Capabilities: <span id="agent-capabilities">None</span></span>
                         </div>
-                        
-                        <div class="services-container">
-                            <h3>Pandemic Services</h3>
-                            <div id="services-list" class="list-container">
-                                <div class="loading">Loading services...</div>
+
+                        <div class="admin-tabs">
+                            <button class="tab-button active" data-tab="services">Services</button>
+                            <button class="tab-button" data-tab="users">Users</button>
+                            <button class="tab-button" data-tab="groups">Groups</button>
+                            <button class="tab-button" data-tab="config">Config</button>
+                        </div>
+
+                        <div class="tab-content">
+                            <div id="services-tab" class="tab-panel active">
+                                <div id="services-list" class="list-container">
+                                    <div class="loading">Loading services...</div>
+                                </div>
+                            </div>
+
+                            <div id="users-tab" class="tab-panel">
+                                <div id="users-list" class="list-container">
+                                    <div class="loading">Loading users...</div>
+                                </div>
+                            </div>
+
+                            <div id="groups-tab" class="tab-panel">
+                                <div id="groups-list" class="list-container">
+                                    <div class="loading">Loading groups...</div>
+                                </div>
+                            </div>
+
+                            <div id="config-tab" class="tab-panel">
+                                <div class="config-container">
+                                    <p>Service configuration overrides</p>
+                                    <div id="config-list" class="list-container">
+                                        <div class="empty">Select a service to view configuration</div>
+                                    </div>
+                                </div>
                             </div>
                         </div>
                     </section>
@@ -72,6 +101,14 @@ class PandemicConsole {
             this.loadPlugins();
             this.checkAgentCapabilities();
             this.setupWebSocket();
+        });
+
+        // Tab switching
+        document.querySelectorAll('.tab-button').forEach(button => {
+            button.addEventListener('click', (e) => {
+                const tabName = e.target.dataset.tab;
+                this.switchTab(tabName);
+            });
         });
     }
 
@@ -109,6 +146,8 @@ class PandemicConsole {
             if (data.agent_available && data.capabilities.length > 0) {
                 adminSection.style.display = 'block';
                 this.loadServices();
+                this.loadUsers();
+                this.loadGroups();
             } else {
                 adminSection.style.display = 'none';
             }
@@ -226,17 +265,35 @@ class PandemicConsole {
         }
     }
 
+    switchTab(tabName) {
+        // Remove active class from all tabs and panels
+        document.querySelectorAll('.tab-button').forEach(btn => btn.classList.remove('active'));
+        document.querySelectorAll('.tab-panel').forEach(panel => panel.classList.remove('active'));
+
+        // Add active class to selected tab and panel
+        document.querySelector(`[data-tab="${tabName}"]`).classList.add('active');
+        document.getElementById(`${tabName}-tab`).classList.add('active');
+
+        // Load data for the selected tab
+        switch(tabName) {
+            case 'services': this.loadServices(); break;
+            case 'users': this.loadUsers(); break;
+            case 'groups': this.loadGroups(); break;
+            case 'config': break; // Config loads on demand
+        }
+    }
+
     async loadPlugins() {
         try {
             const result = await this.apiRequest('/api/plugins');
             const plugins = result.data || [];
-            
+
             const container = document.getElementById('plugins-list');
             if (plugins.length === 0) {
                 container.innerHTML = '<div class="empty">No plugins registered</div>';
                 return;
             }
-            
+
             container.innerHTML = plugins.map(plugin => `
                 <div class="plugin-item">
                     <div class="plugin-info">
@@ -254,17 +311,17 @@ class PandemicConsole {
 
     async loadServices() {
         if (!this.agentCapabilities.includes('systemd')) return;
-        
+
         try {
             const result = await this.apiRequest('/api/admin/services');
             const services = result.data?.services || [];
-            
+
             const container = document.getElementById('services-list');
             if (services.length === 0) {
                 container.innerHTML = '<div class="empty">No pandemic services found</div>';
                 return;
             }
-            
+
             container.innerHTML = services.map(service => `
                 <div class="service-item">
                     <div class="service-info">
@@ -291,11 +348,91 @@ class PandemicConsole {
                 method: 'POST',
                 body: JSON.stringify({ action })
             });
-            
+
             // Reload services to show updated status
             setTimeout(() => this.loadServices(), 1000);
         } catch (error) {
             alert(`Failed to ${action} service: ${error.message}`);
+        }
+    }
+
+    async loadUsers() {
+        if (!this.agentCapabilities.includes('user_management')) return;
+
+        try {
+            const result = await this.apiRequest('/api/admin/users');
+            const users = result.data?.users || [];
+
+            const container = document.getElementById('users-list');
+            if (users.length === 0) {
+                container.innerHTML = '<div class="empty">No users found</div>';
+                return;
+            }
+
+            container.innerHTML = users.map(user => `
+                <div class="user-item">
+                    <div class="user-info">
+                        <strong>${user}</strong>
+                    </div>
+                    <div class="user-actions">
+                        <button onclick="pandemicConsole.deleteUser('${user}')" class="danger">Delete</button>
+                    </div>
+                </div>
+            `).join('');
+        } catch (error) {
+            document.getElementById('users-list').innerHTML = 
+                `<div class="error">Failed to load users: ${error.message}</div>`;
+        }
+    }
+
+    async loadGroups() {
+        if (!this.agentCapabilities.includes('group_management')) return;
+
+        try {
+            const result = await this.apiRequest('/api/admin/groups');
+            const groups = result.data?.groups || [];
+
+            const container = document.getElementById('groups-list');
+            if (groups.length === 0) {
+                container.innerHTML = '<div class="empty">No groups found</div>';
+                return;
+            }
+
+            container.innerHTML = groups.map(group => `
+                <div class="group-item">
+                    <div class="group-info">
+                        <strong>${group}</strong>
+                    </div>
+                    <div class="group-actions">
+                        <button onclick="pandemicConsole.deleteGroup('${group}')" class="danger">Delete</button>
+                    </div>
+                </div>
+            `).join('');
+        } catch (error) {
+            document.getElementById('groups-list').innerHTML =
+                `<div class="error">Failed to load groups: ${error.message}</div>`;
+        }
+    }
+
+    async deleteUser(username) {
+        if (!confirm(`Delete user ${username}?`)) return;
+
+        try {
+            await this.apiRequest(`/api/admin/users/${username}`, { method: 'DELETE' });
+            this.loadUsers();
+        } catch (error) {
+            alert(`Failed to delete user: ${error.message}`);
+        }
+    }
+
+    async deleteGroup(groupname) {
+        if (!confirm(`Delete group ${groupname}?`)) return;
+
+        try {
+            await this.apiRequest(`/api/admin/groups/${groupname}`, { method: 'DELETE' });
+            this.loadGroups();
+        } catch (error) {
+            alert(`Failed to delete group: ${error.message}`);
         }
     }
 }
