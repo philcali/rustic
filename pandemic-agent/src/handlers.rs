@@ -95,6 +95,7 @@ pub async fn handle_agent_request(request: AgentRequest) -> Response {
                 Err(e) => Response::error(format!("Failed to get service config: {}", e)),
             }
         }
+
         AgentRequest::ServiceConfigReset { service } => {
             info!("Resetting service config for: {}", service);
             match delete_service_override(&service).await {
