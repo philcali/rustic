@@ -279,7 +279,6 @@ class PandemicConsole {
             case 'services': this.loadServices(); break;
             case 'users': this.loadUsers(); break;
             case 'groups': this.loadGroups(); break;
-            case 'config': break; // Config loads on demand
         }
     }
 

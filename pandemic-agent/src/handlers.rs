@@ -2,8 +2,11 @@ use pandemic_protocol::{AgentRequest, Response};
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
-use crate::systemd::{execute_systemctl, list_pandemic_services, set_service_override};
-use crate::users::{create_group, create_user, list_users};
+use crate::systemd::{
+    delete_service_override, execute_systemctl, get_service_override, list_pandemic_services,
+    set_service_override,
+};
+use crate::users::{create_group, create_user, list_groups, list_users};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PandemicServiceSummary {
@@ -55,6 +58,14 @@ pub async fn handle_agent_request(request: AgentRequest) -> Response {
             }
         }
 
+        AgentRequest::ListGroups => {
+            info!("Listing groups");
+            match list_groups().await {
+                Ok(groups) => Response::success_with_data(serde_json::json!({ "groups": groups })),
+                Err(e) => Response::error(format!("Failed to list groups: {}", e)),
+            }
+        }
+
         AgentRequest::GroupCreate { groupname } => {
             info!("Creating group: {}", groupname);
             match create_group(&groupname).await {
@@ -68,6 +79,24 @@ pub async fn handle_agent_request(request: AgentRequest) -> Response {
             match set_service_override(&service, &overrides).await {
                 Ok(_) => Response::success(),
                 Err(e) => Response::error(format!("Failed to set service override: {}", e)),
+            }
+        }
+
+        AgentRequest::GetServiceConfig { service } => {
+            info!("Getting service config for: {}", service);
+            match get_service_override(&service).await {
+                Ok(config) => Response::success_with_data(serde_json::json!({
+                    "service": service,
+                    "config": config
+                })),
+                Err(e) => Response::error(format!("Failed to get service config: {}", e)),
+            }
+        }
+        AgentRequest::ServiceConfigReset { service } => {
+            info!("Resetting service config for: {}", service);
+            match delete_service_override(&service).await {
+                Ok(_) => Response::success(),
+                Err(e) => Response::error(format!("Failed to reset service config: {}", e)),
             }
         }
 

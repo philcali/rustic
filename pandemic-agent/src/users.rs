@@ -58,6 +58,21 @@ pub async fn list_users() -> anyhow::Result<Vec<String>> {
     Ok(users)
 }
 
+pub async fn list_groups() -> anyhow::Result<Vec<String>> {
+    let output = Command::new("getent").arg("group").output()?;
+    if !output.status.success() {
+        return Err(anyhow::anyhow!("getent group failed"));
+    }
+
+    let groups: Vec<String> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|line| line.split(':').next().unwrap_or("").to_string())
+        .filter(|g| !g.is_empty())
+        .collect();
+
+    Ok(groups)
+}
+
 pub async fn create_group(groupname: &str) -> anyhow::Result<()> {
     let output = Command::new("groupadd").arg(groupname).output()?;
     if !output.status.success() {
