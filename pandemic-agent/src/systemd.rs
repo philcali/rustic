@@ -55,6 +55,62 @@ pub async fn list_pandemic_services() -> Result<Vec<serde_json::Value>> {
     }
 }
 
+pub async fn delete_service_override(service: &str) -> anyhow::Result<()> {
+    let override_dir = format!("/etc/systemd/system/{}.service.d", service);
+    let override_file = format!("{}/override.conf", override_dir);
+
+    if std::path::Path::new(&override_file).exists() {
+        std::fs::remove_file(override_file)?;
+        std::fs::remove_dir_all(override_dir)?;
+    }
+
+    // Reload systemd
+    let status = Command::new("systemctl").arg("daemon-reload").status()?;
+    if !status.success() {
+        return Err(anyhow::anyhow!("systemctl daemon-reload failed"));
+    }
+
+    Ok(())
+}
+
+pub async fn get_service_override(service: &str) -> anyhow::Result<Option<ServiceOverrides>> {
+    let override_file = format!("/etc/systemd/system/{}.service.d/override.conf", service);
+    if !std::path::Path::new(&override_file).exists() {
+        return Ok(None);
+    }
+
+    let content = std::fs::read_to_string(override_file)?;
+    let mut overrides = ServiceOverrides {
+        environment: None,
+        exec_start: None,
+        restart: None,
+        user: None,
+        group: None,
+    };
+
+    for line in content.lines() {
+        if let Some((key, value)) = line.split_once('=') {
+            match key {
+                "User" => overrides.user = Some(value.to_string()),
+                "Group" => overrides.group = Some(value.to_string()),
+                "Restart" => overrides.restart = Some(value.to_string()),
+                "ExecStart" => overrides.exec_start = Some(value.to_string()),
+                "Environment" => {
+                    if let Some((env_key, env_value)) = value.split_once('=') {
+                        overrides
+                            .environment
+                            .get_or_insert_with(Default::default)
+                            .insert(env_key.to_string(), env_value.to_string());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    Ok(Some(overrides))
+}
+
 pub async fn set_service_override(
     service: &str,
     overrides: &ServiceOverrides,
@@ -62,7 +118,7 @@ pub async fn set_service_override(
     let override_dir = format!("/etc/systemd/system/{}.service.d", service);
     std::fs::create_dir_all(&override_dir)?;
 
-    let override_file = format!("{}/pandemic-override.conf", override_dir);
+    let override_file = format!("{}/override.conf", override_dir);
     let mut content = String::from("[Service]\n");
 
     if let Some(user) = &overrides.user {
