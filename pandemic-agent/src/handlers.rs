@@ -6,7 +6,10 @@ use crate::systemd::{
     delete_service_override, execute_systemctl, get_service_override, list_pandemic_services,
     set_service_override,
 };
-use crate::users::{create_group, create_user, list_groups, list_users};
+use crate::users::{
+    add_user_to_group, create_group, create_user, delete_group, delete_user, list_groups,
+    list_users, remove_user_from_group, update_user,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PandemicServiceSummary {
@@ -122,6 +125,50 @@ pub async fn handle_agent_request(request: AgentRequest) -> Response {
             }
         }
 
-        _ => Response::error("Operation not implemented yet"),
+        AgentRequest::UserDelete { username } => {
+            info!("Deleting user: {}", username);
+            match delete_user(&username).await {
+                Ok(_) => Response::success(),
+                Err(e) => Response::error(format!("Failed to delete user: {}", e)),
+            }
+        }
+
+        AgentRequest::UserModify { username, config } => {
+            info!("Modifying user: {}", username);
+            match update_user(&username, &config).await {
+                Ok(_) => Response::success(),
+                Err(e) => Response::error(format!("Failed to modify user: {}", e)),
+            }
+        }
+
+        AgentRequest::GroupDelete { groupname } => {
+            info!("Deleting group: {}", groupname);
+            match delete_group(&groupname).await {
+                Ok(_) => Response::success(),
+                Err(e) => Response::error(format!("Failed to delete group: {}", e)),
+            }
+        }
+
+        AgentRequest::GroupAddUser {
+            groupname,
+            username,
+        } => {
+            info!("Adding user to group: {} {}", username, groupname);
+            match add_user_to_group(&username, &groupname).await {
+                Ok(_) => Response::success(),
+                Err(e) => Response::error(format!("Failed to add user to group: {}", e)),
+            }
+        }
+
+        AgentRequest::GroupRemoveUser {
+            groupname,
+            username,
+        } => {
+            info!("Removing user from group: {} {}", username, groupname);
+            match remove_user_from_group(&username, &groupname).await {
+                Ok(_) => Response::success(),
+                Err(e) => Response::error(format!("Failed to remove user from group: {}", e)),
+            }
+        }
     }
 }
