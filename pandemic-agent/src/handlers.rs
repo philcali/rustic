@@ -1,7 +1,6 @@
 use pandemic_protocol::{AgentRequest, Response};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::systemd::{
     delete_service_override, execute_systemctl, get_service_override, list_pandemic_services,
@@ -17,157 +16,6 @@ pub struct PandemicServiceSummary {
     pub name: String,
     pub description: String,
     pub status: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct BlocklistConfig {
-    blocklist: Blocklist,
-}
-
-#[derive(Debug, Deserialize)]
-struct Blocklist {
-    users: Vec<String>,
-    groups: Vec<String>,
-}
-
-fn load_blocklist() -> (HashSet<String>, HashSet<String>) {
-    let config_content =
-        std::fs::read_to_string("/etc/pandemic/blocklist.toml").unwrap_or_else(|_| {
-            warn!("No blocklist config found, using built-in defaults");
-            get_default_blocklist_config()
-        });
-
-    match toml::from_str::<BlocklistConfig>(&config_content) {
-        Ok(config) => (
-            config.blocklist.users.into_iter().collect(),
-            config.blocklist.groups.into_iter().collect(),
-        ),
-        Err(e) => {
-            warn!(
-                "Failed to parse blocklist config: {}, using built-in defaults",
-                e
-            );
-            get_default_blocklist()
-        }
-    }
-}
-
-fn get_default_users() -> Vec<&'static str> {
-    vec![
-        "root",
-        "daemon",
-        "bin",
-        "sys",
-        "sync",
-        "games",
-        "man",
-        "lp",
-        "mail",
-        "news",
-        "uucp",
-        "proxy",
-        "www-data",
-        "backup",
-        "list",
-        "irc",
-        "gnats",
-        "nobody",
-        "systemd-network",
-        "systemd-resolve",
-        "systemd-timesync",
-        "messagebus",
-        "syslog",
-        "uuidd",
-        "tcpdump",
-        "tss",
-        "_apt",
-        "lxd",
-        "dnsmasq",
-        "landscape",
-        "pollinate",
-        "sshd",
-        "pandemic",
-    ]
-}
-
-fn get_default_groups() -> Vec<&'static str> {
-    vec![
-        "root",
-        "daemon",
-        "bin",
-        "sys",
-        "adm",
-        "tty",
-        "disk",
-        "lp",
-        "mail",
-        "news",
-        "uucp",
-        "man",
-        "proxy",
-        "kmem",
-        "dialout",
-        "fax",
-        "voice",
-        "cdrom",
-        "floppy",
-        "tape",
-        "sudo",
-        "audio",
-        "dip",
-        "www-data",
-        "backup",
-        "operator",
-        "list",
-        "irc",
-        "src",
-        "gnats",
-        "shadow",
-        "utmp",
-        "video",
-        "sasl",
-        "plugdev",
-        "staff",
-        "games",
-        "users",
-        "nogroup",
-        "systemd-journal",
-        "systemd-network",
-        "systemd-resolve",
-        "systemd-timesync",
-        "input",
-        "kvm",
-        "render",
-        "crontab",
-        "netdev",
-        "messagebus",
-        "systemd-coredump",
-        "lxd",
-        "mlocate",
-        "ssh",
-        "landscape",
-        "admin",
-        "wheel",
-        "pandemic",
-    ]
-}
-
-fn get_default_blocklist_config() -> String {
-    let users = get_default_users();
-    let groups = get_default_groups();
-
-    format!(
-        r#"[blocklist]
-users = {:?}
-groups = {:?}"#,
-        users, groups
-    )
-}
-
-fn get_default_blocklist() -> (HashSet<String>, HashSet<String>) {
-    let users = get_default_users().into_iter().map(String::from).collect();
-    let groups = get_default_groups().into_iter().map(String::from).collect();
-    (users, groups)
 }
 
 pub async fn handle_agent_request(request: AgentRequest) -> Response {
@@ -280,13 +128,6 @@ pub async fn handle_agent_request(request: AgentRequest) -> Response {
 
         AgentRequest::UserDelete { username } => {
             info!("Deleting user: {}", username);
-            let (blocked_users, _) = load_blocklist();
-            if blocked_users.contains(&username) {
-                return Response::error(format!(
-                    "User '{}' is protected and cannot be deleted",
-                    username
-                ));
-            }
             match delete_user(&username).await {
                 Ok(_) => Response::success(),
                 Err(e) => Response::error(format!("Failed to delete user: {}", e)),
@@ -303,13 +144,6 @@ pub async fn handle_agent_request(request: AgentRequest) -> Response {
 
         AgentRequest::GroupDelete { groupname } => {
             info!("Deleting group: {}", groupname);
-            let (_, blocked_groups) = load_blocklist();
-            if blocked_groups.contains(&groupname) {
-                return Response::error(format!(
-                    "Group '{}' is protected and cannot be deleted",
-                    groupname
-                ));
-            }
             match delete_group(&groupname).await {
                 Ok(_) => Response::success(),
                 Err(e) => Response::error(format!("Failed to delete group: {}", e)),
