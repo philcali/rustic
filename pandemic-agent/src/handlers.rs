@@ -1,3 +1,4 @@
+use pandemic_common::RegistryClient;
 use pandemic_protocol::{AgentRequest, Response};
 use serde::{Deserialize, Serialize};
 use tracing::info;
@@ -158,6 +159,47 @@ pub async fn handle_agent_request(request: AgentRequest) -> Response {
             match add_user_to_group(&username, &groupname).await {
                 Ok(_) => Response::success(),
                 Err(e) => Response::error(format!("Failed to add user to group: {}", e)),
+            }
+        }
+
+        AgentRequest::SearchInfections { query } => {
+            info!("Searching infections: {}", query);
+            let client = RegistryClient::new();
+            match client.search_infections(&query).await {
+                Ok(results) => Response::success_with_data(serde_json::json!({
+                    "infections": results
+                })),
+                Err(e) => Response::error(format!("Failed to search infections: {}", e)),
+            }
+        }
+
+        AgentRequest::GetInfectionManifest { name } => {
+            info!("Getting infection manifest: {}", name);
+            let client = RegistryClient::new();
+            match client.get_infection_manifest(&name).await {
+                Ok(manifest) => Response::success_with_data(serde_json::json!(manifest)),
+                Err(e) => Response::error(format!("Failed to get manifest: {}", e)),
+            }
+        }
+
+        AgentRequest::InstallInfection { name, target_path } => {
+            info!("Installing infection: {}", name);
+            let client = RegistryClient::new();
+
+            let manifest = match client.get_infection_manifest(&name).await {
+                Ok(m) => m,
+                Err(e) => return Response::error(format!("Failed to get manifest: {}", e)),
+            };
+
+            let install_path = target_path.unwrap_or_else(|| format!("/usr/local/bin/{}", name));
+
+            match client.download_infection(&manifest, &install_path).await {
+                Ok(_) => Response::success_with_data(serde_json::json!({
+                    "name": name,
+                    "version": manifest.version,
+                    "path": install_path
+                })),
+                Err(e) => Response::error(format!("Failed to install infection: {}", e)),
             }
         }
 

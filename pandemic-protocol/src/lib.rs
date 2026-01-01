@@ -140,6 +140,18 @@ pub enum AgentRequest {
     GetServiceConfig {
         service: String,
     },
+
+    // Registry operations
+    SearchInfections {
+        query: String,
+    },
+    GetInfectionManifest {
+        name: String,
+    },
+    InstallInfection {
+        name: String,
+        target_path: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1507,6 +1507,7 @@ dependencies = [
  "anyhow",
  "clap",
  "libc",
+ "pandemic-common",
  "pandemic-protocol",
  "serde",
  "serde_json",
