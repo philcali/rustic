@@ -332,6 +332,14 @@ class PandemicConsole {
                         <button onclick="pandemicConsole.controlService('${service.name}', 'start')">Start</button>
                         <button onclick="pandemicConsole.controlService('${service.name}', 'stop')">Stop</button>
                         <button onclick="pandemicConsole.controlService('${service.name}', 'restart')">Restart</button>
+                        <button onclick="pandemicConsole.toggleServiceConfig('${service.name}')">Config</button>
+                    </div>
+                    <div id="config-${service.name}" class="service-config" style="display: none;">
+                        <div class="config-actions">
+                            <button onclick="pandemicConsole.showServiceConfig('${service.name}')">Show</button>
+                            <button onclick="pandemicConsole.resetServiceConfig('${service.name}')">Reset</button>
+                        </div>
+                        <div id="config-details-${service.name}" class="config-details"></div>
                     </div>
                 </div>
             `).join('');
@@ -432,6 +440,48 @@ class PandemicConsole {
             this.loadGroups();
         } catch (error) {
             alert(`Failed to delete group: ${error.message}`);
+        }
+    }
+
+    toggleServiceConfig(serviceName) {
+        const configDiv = document.getElementById(`config-${serviceName}`);
+        const isVisible = configDiv.style.display !== 'none';
+        configDiv.style.display = isVisible ? 'none' : 'block';
+    }
+
+    async showServiceConfig(serviceName) {
+        if (!this.agentCapabilities.includes('service_config')) return;
+
+        try {
+            const result = await this.apiRequest(`/api/admin/services/${serviceName}/config`);
+            const configDetails = document.getElementById(`config-details-${serviceName}`);
+
+            if (result.data && result.data.config) {
+                const config = result.data.config;
+                configDetails.innerHTML = `
+                    <div class="config-display">
+                        <h4>Current Configuration:</h4>
+                        <pre>${JSON.stringify(config, null, 2)}</pre>
+                    </div>
+                `;
+            } else {
+                configDetails.innerHTML = '<div class="empty">No configuration overrides</div>';
+            }
+        } catch (error) {
+            const configDetails = document.getElementById(`config-details-${serviceName}`);
+            configDetails.innerHTML = `<div class="error">Failed to load config: ${error.message}</div>`;
+        }
+    }
+
+    async resetServiceConfig(serviceName) {
+        if (!confirm(`Reset configuration for ${serviceName}?`)) return;
+
+        try {
+            await this.apiRequest(`/api/admin/services/${serviceName}/config`, { method: 'DELETE' });
+            const configDetails = document.getElementById(`config-details-${serviceName}`);
+            configDetails.innerHTML = '<div class="success">Configuration reset successfully</div>';
+        } catch (error) {
+            alert(`Failed to reset config: ${error.message}`);
         }
     }
 }
