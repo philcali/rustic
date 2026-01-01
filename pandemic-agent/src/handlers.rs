@@ -41,7 +41,7 @@ pub async fn handle_agent_request(request: AgentRequest) -> Response {
         AgentRequest::GetCapabilities => {
             info!("Capabilities requested");
             Response::success_with_data(serde_json::json!({
-                "capabilities": ["systemd", "service_management", "user_management", "group_management", "service_config"]
+                "capabilities": ["systemd", "service_management", "user_management", "group_management", "service_config", "infection_registry"]
             }))
         }
 
