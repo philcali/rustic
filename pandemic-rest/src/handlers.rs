@@ -1,6 +1,6 @@
 use anyhow::Error;
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::Json,
     Extension,
@@ -11,6 +11,7 @@ use pandemic_protocol::{
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -356,6 +357,55 @@ pub async fn reset_service_config(
     require_scope!(&state.auth_config, &scopes, "admin");
 
     let request = AgentRequest::ServiceConfigReset { service };
+    let agent_client = AgentClient::default();
+    let response = agent_client.send_agent_request(&request);
+    format_pandemic_response(response.await)
+}
+// Registry handlers
+pub async fn search_infections(
+    State(state): State<AppState>,
+    Query(params): Query<HashMap<String, String>>,
+    Extension(scopes): Extension<Vec<String>>,
+) -> ApiResult {
+    require_scope!(&state.auth_config, &scopes, "admin");
+
+    let query = params.get("q").unwrap_or(&String::new()).clone();
+    let request = AgentRequest::SearchInfections { query };
+    let agent_client = AgentClient::default();
+    let response = agent_client.send_agent_request(&request);
+    format_pandemic_response(response.await)
+}
+
+pub async fn get_infection_manifest(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Extension(scopes): Extension<Vec<String>>,
+) -> ApiResult {
+    require_scope!(&state.auth_config, &scopes, "admin");
+
+    let request = AgentRequest::GetInfectionManifest { name };
+    let agent_client = AgentClient::default();
+    let response = agent_client.send_agent_request(&request);
+    format_pandemic_response(response.await)
+}
+
+#[derive(serde::Deserialize)]
+pub struct InstallPayload {
+    target_path: Option<String>,
+}
+
+pub async fn install_infection(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Extension(scopes): Extension<Vec<String>>,
+    Json(payload): Json<InstallPayload>,
+) -> ApiResult {
+    require_scope!(&state.auth_config, &scopes, "admin");
+
+    let request = AgentRequest::InstallInfection {
+        name,
+        target_path: payload.target_path,
+    };
     let agent_client = AgentClient::default();
     let response = agent_client.send_agent_request(&request);
     format_pandemic_response(response.await)
