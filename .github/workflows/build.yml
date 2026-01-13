@@ -69,7 +69,6 @@ jobs:
       env:
         CC: ${{ steps.install_cc.outputs.cc }}
         CXX: ${{ steps.install_cc.outputs.cxx }}
-        PKG_CONFIG_ALLOW_CROSS: "1"
         BINDGEN_EXTRA_CLANG_ARGS: "-I/usr/include"
       run: cross build --release --target ${{ matrix.target }}
 
