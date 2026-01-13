@@ -70,8 +70,6 @@ jobs:
         CC: ${{ steps.install_cc.outputs.cc }}
         CXX: ${{ steps.install_cc.outputs.cxx }}
         BINDGEN_EXTRA_CLANG_ARGS: "-I/usr/include"
-        OPENSSL_STATIC: 1
-        OPENSSL_VENDORED: 1
       run: cross build --release --target ${{ matrix.target }}
 
     - name: Upload build artifacts
