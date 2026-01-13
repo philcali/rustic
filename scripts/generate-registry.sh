@@ -209,7 +209,7 @@ for component in "${CORE_COMPONENTS[@]}"; do
   "version": "$VERSION",
   "description": "$description",
   "author": "Pandemic Team",
-  "homepage": "https://github.com/philcali/rustic",
+  "homepage": "$BASE_URL",
   "license": "MIT",
   "keywords": $keywords,
   "dependencies": [],
