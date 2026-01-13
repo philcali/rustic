@@ -1,6 +1,7 @@
 mod agent;
 mod bootstrap;
 mod daemon;
+mod registry;
 mod service;
 mod system;
 
@@ -40,6 +41,39 @@ enum Commands {
     Agent {
         #[command(subcommand)]
         action: AgentAction,
+    },
+    /// Search and install infections from registry
+    Registry {
+        #[command(subcommand)]
+        action: RegistryAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum RegistryAction {
+    /// Search for infections in the registry
+    Search {
+        /// Search query
+        query: String,
+        /// Registry URL to use
+        #[arg(long)]
+        registry_url: Option<String>,
+    },
+    /// Get infection manifest details
+    Get {
+        /// Infection name
+        name: String,
+        /// Registry URL to use
+        #[arg(long)]
+        registry_url: Option<String>,
+    },
+    /// Install an infection from the registry
+    Install {
+        /// Infection name
+        name: String,
+        /// Registry URL to use
+        #[arg(long)]
+        registry_url: Option<String>,
     },
 }
 
@@ -179,6 +213,9 @@ async fn main() -> Result<()> {
         Commands::Service { action } => service::handle_service_command(action)?,
         Commands::Bootstrap { action } => bootstrap::handle_bootstrap_command(action)?,
         Commands::Agent { action } => agent::handle_agent_command(action)?,
+        Commands::Registry { action } => {
+            registry::handle_registry_command(&args.socket_path, action).await?
+        }
     }
 
     Ok(())

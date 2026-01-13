@@ -45,8 +45,11 @@ pub struct RegistryClient {
 
 impl RegistryClient {
     pub fn new() -> Self {
+        let default_url = "https://philcali.github.io/rustic/".to_string();
+        let registry_url = std::env::var("PANDEMIC_REGISTRY_URL").unwrap_or(default_url);
+
         Self {
-            registries: vec!["https://pandemic-infections.github.io/registry".to_string()],
+            registries: vec![registry_url],
             client: reqwest::Client::new(),
         }
     }
@@ -54,6 +57,13 @@ impl RegistryClient {
     pub fn with_registries(registries: Vec<String>) -> Self {
         Self {
             registries,
+            client: reqwest::Client::new(),
+        }
+    }
+
+    pub fn with_registry_url(url: String) -> Self {
+        Self {
+            registries: vec![url],
             client: reqwest::Client::new(),
         }
     }

@@ -56,6 +56,7 @@ class PandemicConsole {
                             <button class="tab-button active" data-tab="services">Services</button>
                             <button class="tab-button" data-tab="users">Users</button>
                             <button class="tab-button" data-tab="groups">Groups</button>
+                            <button class="tab-button" data-tab="registry">Registry</button>
                             <button class="tab-button" data-tab="config">Config</button>
                         </div>
 
@@ -75,6 +76,18 @@ class PandemicConsole {
                             <div id="groups-tab" class="tab-panel">
                                 <div id="groups-list" class="list-container">
                                     <div class="loading">Loading groups...</div>
+                                </div>
+                            </div>
+
+                            <div id="registry-tab" class="tab-panel">
+                                <div class="registry-container">
+                                    <div class="registry-search">
+                                        <input type="text" id="registry-search" placeholder="Search infections...">
+                                        <button id="search-button">Search</button>
+                                    </div>
+                                    <div id="registry-results" class="list-container">
+                                        <div class="empty">Enter a search term to find infections</div>
+                                    </div>
                                 </div>
                             </div>
 
@@ -109,6 +122,17 @@ class PandemicConsole {
                 const tabName = e.target.dataset.tab;
                 this.switchTab(tabName);
             });
+        });
+
+        // Registry search
+        document.getElementById('search-button').addEventListener('click', () => {
+            this.searchInfections();
+        });
+        
+        document.getElementById('registry-search').addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') {
+                this.searchInfections();
+            }
         });
     }
 
@@ -279,6 +303,7 @@ class PandemicConsole {
             case 'services': this.loadServices(); break;
             case 'users': this.loadUsers(); break;
             case 'groups': this.loadGroups(); break;
+            case 'registry': break; // Registry is search-based
         }
     }
 
@@ -482,6 +507,109 @@ class PandemicConsole {
             configDetails.innerHTML = '<div class="success">Configuration reset successfully</div>';
         } catch (error) {
             alert(`Failed to reset config: ${error.message}`);
+        }
+    }
+
+    async searchInfections() {
+        const query = document.getElementById('registry-search').value.trim();
+        if (!query) return;
+
+        const container = document.getElementById('registry-results');
+        container.innerHTML = '<div class="loading">Searching infections...</div>';
+
+        try {
+            const result = await this.apiRequest(`/api/admin/registry/search?q=${encodeURIComponent(query)}`);
+            const infections = result.data?.infections || [];
+
+            if (infections.length === 0) {
+                container.innerHTML = '<div class="empty">No infections found</div>';
+                return;
+            }
+
+            container.innerHTML = infections.map(infection => `
+                <div class="infection-item">
+                    <div class="infection-info">
+                        <strong>${infection.name}</strong>
+                        <span class="version">v${infection.version}</span>
+                    </div>
+                    <div class="infection-description">${infection.description || 'No description'}</div>
+                    <div class="infection-meta">
+                        <span>Author: ${infection.author || 'Unknown'}</span>
+                        <span>Repository: ${infection.repository || 'N/A'}</span>
+                    </div>
+                    <div class="infection-actions">
+                        <button onclick="pandemicConsole.viewInfectionManifest('${infection.name}')">View Details</button>
+                        <button onclick="pandemicConsole.installInfection('${infection.name}')" class="primary">Install</button>
+                    </div>
+                    <div id="manifest-${infection.name}" class="infection-manifest" style="display: none;"></div>
+                </div>
+            `).join('');
+        } catch (error) {
+            container.innerHTML = `<div class="error">Search failed: ${error.message}</div>`;
+        }
+    }
+
+    async viewInfectionManifest(infectionName) {
+        const manifestDiv = document.getElementById(`manifest-${infectionName}`);
+        const isVisible = manifestDiv.style.display !== 'none';
+        
+        if (isVisible) {
+            manifestDiv.style.display = 'none';
+            return;
+        }
+
+        manifestDiv.innerHTML = '<div class="loading">Loading manifest...</div>';
+        manifestDiv.style.display = 'block';
+
+        try {
+            const result = await this.apiRequest(`/api/admin/registry/infections/${infectionName}`);
+            const manifest = result.data;
+
+            manifestDiv.innerHTML = `
+                <div class="manifest-display">
+                    <h4>Infection Manifest:</h4>
+                    <div class="manifest-details">
+                        <p><strong>Name:</strong> ${manifest.name}</p>
+                        <p><strong>Version:</strong> ${manifest.version}</p>
+                        <p><strong>Description:</strong> ${manifest.description || 'N/A'}</p>
+                        <p><strong>Author:</strong> ${manifest.author || 'Unknown'}</p>
+                        <p><strong>Repository:</strong> ${manifest.repository || 'N/A'}</p>
+                        <p><strong>License:</strong> ${manifest.license || 'N/A'}</p>
+                        ${manifest.dependencies && manifest.dependencies.length > 0 ? 
+                            `<p><strong>Dependencies:</strong> ${manifest.dependencies.join(', ')}</p>` : ''}
+                        ${manifest.platforms && manifest.platforms.length > 0 ? 
+                            `<p><strong>Platforms:</strong> ${manifest.platforms.join(', ')}</p>` : ''}
+                    </div>
+                    ${manifest.readme ? `
+                        <div class="manifest-readme">
+                            <h5>README:</h5>
+                            <pre>${manifest.readme}</pre>
+                        </div>
+                    ` : ''}
+                </div>
+            `;
+        } catch (error) {
+            manifestDiv.innerHTML = `<div class="error">Failed to load manifest: ${error.message}</div>`;
+        }
+    }
+
+    async installInfection(infectionName) {
+        if (!confirm(`Install infection '${infectionName}'?`)) return;
+
+        try {
+            const result = await this.apiRequest(`/api/admin/registry/infections/${infectionName}/install`, {
+                method: 'POST'
+            });
+
+            if (result.status === 'Success') {
+                alert(`Successfully installed ${infectionName}`);
+                // Refresh plugins list to show the new infection
+                this.loadPlugins();
+            } else {
+                alert(`Installation failed: ${result.message || 'Unknown error'}`);
+            }
+        } catch (error) {
+            alert(`Installation failed: ${error.message}`);
         }
     }
 }
