@@ -7,72 +7,9 @@ on:
 
 jobs:
   build:
-    name: Build ${{ matrix.target }}
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        target:
-          - x86_64-unknown-linux-gnu
-          - armv7-unknown-linux-gnueabihf
-          - aarch64-unknown-linux-gnu
-
-    steps:
-    - uses: actions/checkout@v4
-
-    - name: Install compiler
-      id: install_cc
-      uses: rlalik/setup-cpp-compiler@master
-      with:
-        compiler: latest
-
-    - uses: actions/setup-node@v4
-      with:
-        node-version: '22'
-        cache: 'npm'
-        cache-dependency-path: 'pandemic-console/web/package-lock.json'
-
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@stable
-      with:
-        targets: ${{ matrix.target }}
-
-    - name: Install node dependencies and build web assets
-      run: |
-        npm install
-        npm run build
-      working-directory: pandemic-console/web
-
-    - name: Install dependencies
-      run: |
-        cargo install bindgen-cli
-        cargo install cross --git https://github.com/cross-rs/cross
-
-    - name: Build
-      env:
-        CC: ${{ steps.install_cc.outputs.cc }}
-        CXX: ${{ steps.install_cc.outputs.cxx }}
-        BINDGEN_EXTRA_CLANG_ARGS: "-I/usr/include"
-      run: cross build --release --target ${{ matrix.target }}
-
-    - name: Package binaries
-      run: |
-        mkdir -p dist
-        tar -czf dist/pandemic-${{ matrix.target }}.tar.gz -C target/${{ matrix.target }}/release \
-          pandemic \
-          pandemic-agent \
-          pandemic-cli \
-          pandemic-console \
-          pandemic-iam \
-          pandemic-proxy \
-          pandemic-rest \
-          pandemic-udp \
-          hello-infection
-
-    - name: Upload artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: pandemic-${{ matrix.target }}
-        path: dist/pandemic-${{ matrix.target }}.tar.gz
+    uses: ./.github/workflows/build.yml
+    with:
+      targets: '["x86_64-unknown-linux-gnu", "armv7-unknown-linux-gnueabihf", "aarch64-unknown-linux-gnu"]'
 
   release:
     needs: build
@@ -82,14 +19,31 @@ jobs:
     steps:
     - name: Download artifacts
       uses: actions/download-artifact@v4
+      with:
+        path: artifacts
+
+    - name: Package binaries
+      run: |
+        mkdir -p dist
+        for target in x86_64-unknown-linux-gnu armv7-unknown-linux-gnueabihf aarch64-unknown-linux-gnu; do
+          if [ -d "artifacts/binaries-$target" ]; then
+            tar -czf "dist/pandemic-$target.tar.gz" -C "artifacts/binaries-$target" \
+              pandemic \
+              pandemic-agent \
+              pandemic-cli \
+              pandemic-console \
+              pandemic-iam \
+              pandemic-proxy \
+              pandemic-rest \
+              pandemic-udp \
+              hello-infection 2>/dev/null || true
+          fi
+        done
 
     - name: Create Release
       uses: softprops/action-gh-release@v2
       with:
-        files: |
-          pandemic-x86_64-unknown-linux-gnu/pandemic-x86_64-unknown-linux-gnu.tar.gz
-          pandemic-armv7-unknown-linux-gnueabihf/pandemic-armv7-unknown-linux-gnueabihf.tar.gz
-          pandemic-aarch64-unknown-linux-gnu/pandemic-aarch64-unknown-linux-gnu.tar.gz
+        files: dist/*.tar.gz
         generate_release_notes: true
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
