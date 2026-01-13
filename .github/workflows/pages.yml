@@ -46,6 +46,7 @@ jobs:
         env:
           SOFTWARE_VERSION: ${{ needs.build.outputs.version }}
         run: |
+          find artifacts/ -name 'binaries-*' -exec cp {} ./ \;
           chmod +x scripts/generate-registry.sh
           ./scripts/generate-registry.sh
           cp -r registry docs/
