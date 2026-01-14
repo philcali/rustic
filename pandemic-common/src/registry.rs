@@ -45,7 +45,7 @@ pub struct RegistryClient {
 
 impl RegistryClient {
     pub fn new() -> Self {
-        let default_url = "https://philcali.github.io/rustic/".to_string();
+        let default_url = "https://philcali.github.io/rustic/registry/".to_string();
         let registry_url = std::env::var("PANDEMIC_REGISTRY_URL").unwrap_or(default_url);
 
         Self {

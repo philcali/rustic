@@ -33,7 +33,7 @@ cd target/${ARCHS[0]}/release
 # Find infection binaries
 for binary in *-infection pandemic-*; do
     echo "Checking binary: $binary"
-    if [ "$binary" = "pandemic-agent" ] || [ "$binary" = "pandemic" ]; then
+    if [ "$binary" = "pandemic-agent" ] || [ "$binary" = "pandemic" ] || [ "$binary" = "pandemic-cli" ]; then
         continue
     fi
     if [ -f "$binary" ] && [ -x "$binary" ]; then
@@ -43,7 +43,7 @@ for binary in *-infection pandemic-*; do
 done
 
 # Find core components
-for binary in pandemic pandemic-agent; do
+for binary in pandemic pandemic-agent pandemic-cli; do
     echo "Checking binary: $binary"
     if [ -f "$binary" ] && [ -x "$binary" ]; then
         CORE_COMPONENTS+=("$binary")
@@ -95,6 +95,8 @@ for component in "${CORE_COMPONENTS[@]}"; do
         description="Pandemic daemon - core hub for managing infections"
     elif [ "$name" = "pandemic-agent" ]; then
         description="Pandemic agent - privileged operations handler"
+    elif [ "$name" = "pandemic-cli" ]; then
+        description="Pandemic CLI - command line interface for pandemic daemon"
     fi
     
     cat >> "$REGISTRY_DIR/index.json" << EOF
@@ -174,6 +176,9 @@ for component in "${CORE_COMPONENTS[@]}"; do
     elif [ "$name" = "pandemic-agent" ]; then
         description="Pandemic agent - privileged operations handler for system management"
         keywords='["pandemic", "agent", "privileged", "system"]'
+    elif [ "$name" = "pandemic-cli" ]; then
+        description="Pandemic CLI - command line interface for interacting with the pandemic daemon"
+        keywords='["pandemic", "cli", "interface"]'
     fi
     
     # Build platforms array for all architectures

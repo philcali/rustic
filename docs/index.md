@@ -41,6 +41,52 @@ pandemic-cli daemon status
 hello-infection
 ```
 
+## Static Registry
+
+Pandemic comes with a software registry that is created for every
+release. This registry contains curated infections and core components.
+
+You can explore the registry online at the following URL:
+
+- [Pandemic Registry](https://philcali.github.io/rustic/registry/index.json)
+
+```
+pandemic-cli registry search "pandemic"
+Found 8 infection(s):
+
+📦 pandemic-cli
+   Version: 0.3.0
+   Description: Pandemic CLI - command line interface for pandemic daemon
+
+📦 pandemic-iam
+   Version: 0.3.0
+   Description: Pandemic infection: pandemic-iam
+
+📦 pandemic-udp
+   Version: 0.3.0
+   Description: Pandemic infection: pandemic-udp
+
+📦 pandemic
+   Version: 0.3.0
+   Description: Pandemic daemon - core hub for managing infections
+
+📦 pandemic-rest
+   Version: 0.3.0
+   Description: Pandemic infection: pandemic-rest
+
+📦 pandemic-console
+   Version: 0.3.0
+   Description: Pandemic infection: pandemic-console
+
+📦 pandemic-agent
+   Version: 0.3.0
+   Description: Pandemic agent - privileged operations handler
+
+📦 pandemic-proxy
+   Version: 0.3.0
+   Description: Pandemic infection: pandemic-proxy
+```
+
 ## Edge Device Optimization
 
 Pandemic is designed for resource-constrained environments:
