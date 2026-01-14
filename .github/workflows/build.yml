@@ -76,10 +76,12 @@ jobs:
       run: |
         rm -rf target/${{ matrix.target }}/release/build/
         rm -rf target/${{ matrix.target }}/release/deps/
+        rm -rf target/${{ matrix.target }}/release/*.rlib
+        rm -rf target/${{ matrix.target }}/release/*.d
 
     - name: Upload build artifacts
       uses: actions/upload-artifact@v4
       with:
         name: binaries-${{ matrix.target }}
-        path: target/${{ matrix.target }}/release/
-        include-hidden-files: false
+        path: |
+          target/${{ matrix.target }}/release/

@@ -35,12 +35,13 @@ jobs:
       
       - name: Organize binaries
         run: |
-          mkdir -p target/x86_64-unknown-linux-gnu/
-          mkdir -p target/aarch64-unknown-linux-gnu/
-          mkdir -p target/armv7-unknown-linux-gnueabihf/
-          cp -r artifacts/binaries-x86_64-unknown-linux-gnu target/x86_64-unknown-linux-gnu/release
-          cp -r artifacts/binaries-aarch64-unknown-linux-gnu target/aarch64-unknown-linux-gnu/release
-          cp -r artifacts/binaries-armv7-unknown-linux-gnueabihf target/armv7-unknown-linux-gnueabihf/release
+          mkdir -p target/x86_64-unknown-linux-gnu/release
+          mkdir -p target/aarch64-unknown-linux-gnu/release
+          mkdir -p target/armv7-unknown-linux-gnueabihf/release
+          cp artifacts/binaries-x86_64-unknown-linux-gnu/* target/x86_64-unknown-linux-gnu/release/ 2>/dev/null || true
+          cp artifacts/binaries-aarch64-unknown-linux-gnu/* target/aarch64-unknown-linux-gnu/release/ 2>/dev/null || true
+          cp artifacts/binaries-armv7-unknown-linux-gnueabihf/* target/armv7-unknown-linux-gnueabihf/release/ 2>/dev/null || true
+          find target -type f -exec chmod +x {} \;
           
       - name: Setup Pages
         uses: actions/configure-pages@v4
@@ -55,8 +56,6 @@ jobs:
         env:
           SOFTWARE_VERSION: ${{ needs.build.outputs.version }}
         run: |
-          find artifacts/
-          find target/
           chmod +x scripts/generate-registry.sh
           ./scripts/generate-registry.sh
           sudo cp -r registry ./docs/_site/registry
