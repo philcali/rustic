@@ -38,21 +38,10 @@ jobs:
           mkdir -p target/x86_64-unknown-linux-gnu/
           mkdir -p target/aarch64-unknown-linux-gnu/
           mkdir -p target/armv7-unknown-linux-gnueabihf/
-          cp -r artifacts/binaries-x86_64-unknown-linux-gnu target/x86_64-unknown-linux-gnu/release 2>/dev/null
-          cp -r artifacts/binaries-aarch64-unknown-linux-gnu target/aarch64-unknown-linux-gnu/release 2>/dev/null
-          cp -r artifacts/binaries-armv7-unknown-linux-gnueabihf target/armv7-unknown-linux-gnueabihf/release 2>/dev/null
+          cp -r artifacts/binaries-x86_64-unknown-linux-gnu target/x86_64-unknown-linux-gnu/release
+          cp -r artifacts/binaries-aarch64-unknown-linux-gnu target/aarch64-unknown-linux-gnu/release
+          cp -r artifacts/binaries-armv7-unknown-linux-gnueabihf target/armv7-unknown-linux-gnueabihf/release
           
-      - name: Generate registry index
-        env:
-          SOFTWARE_VERSION: ${{ needs.build.outputs.version }}
-        run: |
-          find artifacts/
-          chmod +x scripts/generate-registry.sh
-          ./scripts/generate-registry.sh
-          mkdir -p docs/_site
-          cp -r registry ./docs/_site
-          cp -r binaries ./docs/_site
-      
       - name: Setup Pages
         uses: actions/configure-pages@v4
 
@@ -61,6 +50,18 @@ jobs:
         with:
           source: './docs'
           destination: './docs/_site'
+
+      - name: Generate registry index
+        env:
+          SOFTWARE_VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          find artifacts/
+          find target/
+          chmod +x scripts/generate-registry.sh
+          ./scripts/generate-registry.sh
+          cp -r registry ./docs/_site
+          cp -r binaries ./docs/_site
+      
       
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
