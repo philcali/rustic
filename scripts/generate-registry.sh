@@ -29,11 +29,10 @@ mkdir -p "$REGISTRY_DIR" "$BINARIES_DIR"
 INFECTIONS=()
 CORE_COMPONENTS=()
 cd target/${ARCHS[0]}/release
-pwd
-ls -l
 
 # Find infection binaries
 for binary in *-infection pandemic-*; do
+    echo "Checking binary: $binary"
     if [ "$binary" = "pandemic-agent" ] || [ "$binary" = "pandemic" ]; then
         continue
     fi
@@ -45,6 +44,7 @@ done
 
 # Find core components
 for binary in pandemic pandemic-agent; do
+    echo "Checking binary: $binary"
     if [ -f "$binary" ] && [ -x "$binary" ]; then
         CORE_COMPONENTS+=("$binary")
         echo "Found core component: $binary"

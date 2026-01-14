@@ -59,8 +59,8 @@ jobs:
           find target/
           chmod +x scripts/generate-registry.sh
           ./scripts/generate-registry.sh
-          cp -r registry ./docs/_site/registry
-          cp -r binaries ./docs/_site/binaries
+          sudo cp -r registry ./docs/_site/registry
+          sudo cp -r binaries ./docs/_site/binaries
       
       
       - name: Upload artifact
