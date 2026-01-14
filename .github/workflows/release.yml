@@ -27,6 +27,7 @@ jobs:
         mkdir -p dist
         for target in x86_64-unknown-linux-gnu armv7-unknown-linux-gnueabihf aarch64-unknown-linux-gnu; do
           if [ -d "artifacts/binaries-$target" ]; then
+            chmod +x artifacts/binaries-$target/*
             tar -czf "dist/pandemic-$target.tar.gz" -C "artifacts/binaries-$target" \
               pandemic \
               pandemic-agent \
