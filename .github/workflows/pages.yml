@@ -38,15 +38,14 @@ jobs:
           mkdir -p target/x86_64-unknown-linux-gnu/release
           mkdir -p target/aarch64-unknown-linux-gnu/release
           mkdir -p target/armv7-unknown-linux-gnueabihf/release
-          cp artifacts/binaries-x86_64-unknown-linux-gnu/* target/x86_64-unknown-linux-gnu/release/ 2>/dev/null || true
-          cp artifacts/binaries-aarch64-unknown-linux-gnu/* target/aarch64-unknown-linux-gnu/release/ 2>/dev/null || true
-          cp artifacts/binaries-armv7-unknown-linux-gnueabihf/* target/armv7-unknown-linux-gnueabihf/release/ 2>/dev/null || true
+          cp artifacts/binaries-x86_64-unknown-linux-gnu/* target/x86_64-unknown-linux-gnu/release/ 2>/dev/null
+          cp artifacts/binaries-aarch64-unknown-linux-gnu/* target/aarch64-unknown-linux-gnu/release/ 2>/dev/null
+          cp artifacts/binaries-armv7-unknown-linux-gnueabihf/* target/armv7-unknown-linux-gnueabihf/release/ 2>/dev/null
 
       - name: Generate registry index
         env:
           SOFTWARE_VERSION: ${{ needs.build.outputs.version }}
         run: |
-          find artifacts/ -name 'binaries-*' -exec cp {} ./ \;
           chmod +x scripts/generate-registry.sh
           ./scripts/generate-registry.sh
           cp -r registry docs/
@@ -54,11 +53,17 @@ jobs:
       
       - name: Setup Pages
         uses: actions/configure-pages@v4
+
+      - name: Run Jekyll Build
+        uses: actions/jekyll-build-pages@v1
+        with:
+          source: './docs'
+          destination: './docs/_site'
       
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: 'docs'
+          path: './docs/_site'
       
       - name: Deploy to GitHub Pages
         id: deployment

@@ -72,6 +72,11 @@ jobs:
         BINDGEN_EXTRA_CLANG_ARGS: "-I/usr/include"
       run: cross build --release --target ${{ matrix.target }}
 
+    - name: Clean up build dir
+      run: |
+        rm -rf target/${{ matrix.target }}/release/build/
+        rm -rf target/${{ matrix.target }}/release/deps/
+
     - name: Upload build artifacts
       uses: actions/upload-artifact@v4
       with:
