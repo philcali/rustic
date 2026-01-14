@@ -29,6 +29,8 @@ mkdir -p "$REGISTRY_DIR" "$BINARIES_DIR"
 INFECTIONS=()
 CORE_COMPONENTS=()
 cd target/${ARCHS[0]}/release
+pwd
+ls -l
 
 # Find infection binaries
 for binary in *-infection pandemic-*; do
