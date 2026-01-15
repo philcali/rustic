@@ -37,11 +37,10 @@ jobs:
         echo "version=$VERSION" >> $GITHUB_OUTPUT
         echo "Version: $VERSION"
 
-    - name: Install compiler
-      id: install_cc
-      uses: rlalik/setup-cpp-compiler@master
-      with:
-        compiler: latest
+    - name: Install cross-compilation dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y gcc-aarch64-linux-gnu gcc-arm-linux-gnueabihf
 
     - uses: actions/setup-node@v4
       with:
@@ -60,17 +59,18 @@ jobs:
         npm run build
       working-directory: pandemic-console/web
 
-    - name: Install dependencies
-      run: |
-        cargo install bindgen-cli
-        cargo install cross --git https://github.com/cross-rs/cross
-
     - name: Build
       env:
-        CC: ${{ steps.install_cc.outputs.cc }}
-        CXX: ${{ steps.install_cc.outputs.cxx }}
-        BINDGEN_EXTRA_CLANG_ARGS: "-I/usr/include"
-      run: cross build --release --target ${{ matrix.target }}
+        CC_x86_64_unknown_linux_gnu: gcc
+        CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+        CC_armv7_unknown_linux_gnueabihf: arm-linux-gnueabihf-gcc
+        CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+        CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER: arm-linux-gnueabihf-gcc
+        OPENSSL_STATIC: 1
+        OPENSSL_VENDORED: 1
+      run: |
+        rustup target add ${{ matrix.target }}
+        cargo build --release --target ${{ matrix.target }}
 
     - name: Clean up build dir
       run: |
