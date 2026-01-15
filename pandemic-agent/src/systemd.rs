@@ -56,7 +56,7 @@ pub async fn list_pandemic_services() -> Result<Vec<serde_json::Value>> {
 }
 
 pub async fn delete_service_override(service: &str) -> anyhow::Result<()> {
-    let override_dir = format!("/etc/systemd/system/{}.service.d", service);
+    let override_dir = format!("/etc/systemd/system/{}.d", service);
     let override_file = format!("{}/override.conf", override_dir);
 
     if std::path::Path::new(&override_file).exists() {
@@ -74,7 +74,7 @@ pub async fn delete_service_override(service: &str) -> anyhow::Result<()> {
 }
 
 pub async fn get_service_override(service: &str) -> anyhow::Result<Option<ServiceOverrides>> {
-    let override_file = format!("/etc/systemd/system/{}.service.d/override.conf", service);
+    let override_file = format!("/etc/systemd/system/{}.d/override.conf", service);
     if !std::path::Path::new(&override_file).exists() {
         return Ok(None);
     }
@@ -115,7 +115,7 @@ pub async fn set_service_override(
     service: &str,
     overrides: &ServiceOverrides,
 ) -> anyhow::Result<()> {
-    let override_dir = format!("/etc/systemd/system/{}.service.d", service);
+    let override_dir = format!("/etc/systemd/system/{}.d", service);
     std::fs::create_dir_all(&override_dir)?;
 
     let override_file = format!("{}/override.conf", override_dir);

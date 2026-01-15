@@ -91,14 +91,6 @@ class PandemicConsole {
                                 </div>
                             </div>
 
-                            <div id="config-tab" class="tab-panel">
-                                <div class="config-container">
-                                    <p>Service configuration overrides</p>
-                                    <div id="config-list" class="list-container">
-                                        <div class="empty">Select a service to view configuration</div>
-                                    </div>
-                                </div>
-                            </div>
                         </div>
                     </section>
                 </main>
@@ -530,12 +522,12 @@ class PandemicConsole {
                 <div class="infection-item">
                     <div class="infection-info">
                         <strong>${infection.name}</strong>
-                        <span class="version">v${infection.version}</span>
+                        <span class="version">v${infection.latest_version}</span>
                     </div>
                     <div class="infection-description">${infection.description || 'No description'}</div>
                     <div class="infection-meta">
-                        <span>Author: ${infection.author || 'Unknown'}</span>
-                        <span>Repository: ${infection.repository || 'N/A'}</span>
+                        <span>Type: ${infection.type || 'Unknown'}</span>
+                        <span>Repository: <a href="${infection.manifest_url || 'N/A'}">[Link]</a></span>
                     </div>
                     <div class="infection-actions">
                         <button onclick="pandemicConsole.viewInfectionManifest('${infection.name}')">View Details</button>
@@ -573,12 +565,13 @@ class PandemicConsole {
                         <p><strong>Version:</strong> ${manifest.version}</p>
                         <p><strong>Description:</strong> ${manifest.description || 'N/A'}</p>
                         <p><strong>Author:</strong> ${manifest.author || 'Unknown'}</p>
-                        <p><strong>Repository:</strong> ${manifest.repository || 'N/A'}</p>
                         <p><strong>License:</strong> ${manifest.license || 'N/A'}</p>
+                        ${manifest.keywords && manifest.keywords.length > 0 ? 
+                            `<p><strong>Keywords:</strong> ${manifest.keywords.map(k => `<span class="version">${k}</span>`).join(' ')}</p>` : ''}
                         ${manifest.dependencies && manifest.dependencies.length > 0 ? 
                             `<p><strong>Dependencies:</strong> ${manifest.dependencies.join(', ')}</p>` : ''}
                         ${manifest.platforms && manifest.platforms.length > 0 ? 
-                            `<p><strong>Platforms:</strong> ${manifest.platforms.join(', ')}</p>` : ''}
+                            `<p><strong>Platforms:</strong> ${manifest.platforms.map(p => `<span class="version">${p.arch}</span>`).join(' ')}</p>` : ''}
                     </div>
                     ${manifest.readme ? `
                         <div class="manifest-readme">
