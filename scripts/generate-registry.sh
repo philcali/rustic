@@ -19,9 +19,18 @@ echo "Using version: $VERSION"
 
 BASE_URL="https://philcali.github.io/rustic"
 
-# Supported architectures
-ARCHS=("x86_64-unknown-linux-musl" "armv7-unknown-linux-musleabihf" "aarch64-unknown-linux-musl")
-ARCH_NAMES=("x86_64" "armv7" "aarch64")
+# Supported architectures - can be overridden by environment
+if [ -n "$BUILD_TARGETS" ]; then
+    IFS=',' read -ra ARCHS <<< "$BUILD_TARGETS"
+else
+    ARCHS=("x86_64-unknown-linux-musl" "armv7-unknown-linux-musleabihf" "aarch64-unknown-linux-musl")
+fi
+
+if [ -n "$ARCH_NAMES" ]; then
+    IFS=',' read -ra ARCH_NAMES <<< "$ARCH_NAMES"
+else
+    ARCH_NAMES=("x86_64" "armv7" "aarch64")
+fi
 
 mkdir -p "$REGISTRY_DIR" "$BINARIES_DIR"
 

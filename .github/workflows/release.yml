@@ -49,6 +49,8 @@ jobs:
     - name: Generate registry index
       env:
         SOFTWARE_VERSION: ${{ needs.build.outputs.version }}
+        BUILD_TARGETS: "x86_64-unknown-linux-musl,armv7-unknown-linux-musleabihf,aarch64-unknown-linux-musl"
+        ARCH_NAMES: "x86_64,armv7,aarch64"
       run: |
         chmod +x scripts/generate-registry.sh
         ./scripts/generate-registry.sh

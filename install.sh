@@ -10,9 +10,9 @@ TEMP_DIR=$(mktemp -d)
 detect_arch() {
     local arch=$(uname -m)
     case $arch in
-        x86_64) echo "x86_64-unknown-linux-gnu" ;;
-        armv7l) echo "armv7-unknown-linux-gnueabihf" ;;
-        aarch64) echo "aarch64-unknown-linux-gnu" ;;
+        x86_64) echo "x86_64-unknown-linux-musl" ;;
+        armv7l) echo "armv7-unknown-linux-musleabihf" ;;
+        aarch64) echo "aarch64-unknown-linux-musl" ;;
         *) echo "Unsupported architecture: $arch" >&2; exit 1 ;;
     esac
 }
