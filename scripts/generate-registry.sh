@@ -20,7 +20,7 @@ echo "Using version: $VERSION"
 BASE_URL="https://philcali.github.io/rustic"
 
 # Supported architectures
-ARCHS=("x86_64-unknown-linux-gnu" "armv7-unknown-linux-gnueabihf" "aarch64-unknown-linux-gnu")
+ARCHS=("x86_64-unknown-linux-musl" "armv7-unknown-linux-musleabihf" "aarch64-unknown-linux-musl")
 ARCH_NAMES=("x86_64" "armv7" "aarch64")
 
 mkdir -p "$REGISTRY_DIR" "$BINARIES_DIR"
