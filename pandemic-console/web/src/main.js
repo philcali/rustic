@@ -590,7 +590,8 @@ class PandemicConsole {
 
         try {
             const result = await this.apiRequest(`/api/admin/registry/infections/${infectionName}/install`, {
-                method: 'POST'
+                method: 'POST',
+                body: JSON.stringify({}),
             });
 
             if (result.status === 'Success') {
