@@ -12,9 +12,9 @@ curl -sSL https://raw.githubusercontent.com/philcali/rustic/main/install.sh | su
 
 ### Download for your architecture:
 
-- **x86_64 (Intel/AMD)**: [pandemic-x86_64-unknown-linux-gnu.tar.gz](https://github.com/philcali/rustic/releases/latest/download/pandemic-x86_64-unknown-linux-gnu.tar.gz)
-- **ARMv7 (Raspberry Pi 3/4)**: [pandemic-armv7-unknown-linux-gnueabihf.tar.gz](https://github.com/philcali/rustic/releases/latest/download/pandemic-armv7-unknown-linux-gnueabihf.tar.gz)  
-- **ARM64**: [pandemic-aarch64-unknown-linux-gnu.tar.gz](https://github.com/philcali/rustic/releases/latest/download/pandemic-aarch64-unknown-linux-gnu.tar.gz)
+- **x86_64 (Intel/AMD)**: [pandemic-x86_64-unknown-linux-musl.tar.gz](https://github.com/philcali/rustic/releases/latest/download/pandemic-x86_64-unknown-linux-musl.tar.gz)
+- **ARMv7 (Raspberry Pi 3/4)**: [pandemic-armv7-unknown-linux-musleabihf.tar.gz](https://github.com/philcali/rustic/releases/latest/download/pandemic-armv7-unknown-linux-musleabihf.tar.gz) 
+- **ARM64**: [pandemic-aarch64-unknown-linux-musl.tar.gz](https://github.com/philcali/rustic/releases/latest/download/pandemic-aarch64-unknown-linux-musl.tar.gz)
 
 ### Extract and install:
 
