@@ -34,6 +34,7 @@ pub struct RegistryIndex {
 pub struct InfectionSummary {
     pub name: String,
     pub latest_version: String,
+    pub type_: String,
     pub description: String,
     pub manifest_url: String,
 }

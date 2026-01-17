@@ -57,7 +57,6 @@ class PandemicConsole {
                             <button class="tab-button" data-tab="users">Users</button>
                             <button class="tab-button" data-tab="groups">Groups</button>
                             <button class="tab-button" data-tab="registry">Registry</button>
-                            <button class="tab-button" data-tab="config">Config</button>
                         </div>
 
                         <div class="tab-content">
@@ -591,7 +590,8 @@ class PandemicConsole {
 
         try {
             const result = await this.apiRequest(`/api/admin/registry/infections/${infectionName}/install`, {
-                method: 'POST'
+                method: 'POST',
+                body: JSON.stringify({}),
             });
 
             if (result.status === 'Success') {
