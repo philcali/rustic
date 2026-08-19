@@ -22,9 +22,19 @@ impl Daemon {
                     data: json!(plugin),
                     timestamp: Some(SystemTime::now()),
                 };
-                self.event_bus.publish(event, &self.connections);
+                self.event_bus
+                    .register_connection(&plugin.name, connection_id);
+                let targets = self.event_bus.publish(&event);
+                for target_id in targets {
+                    if let Some(context) = self.connections.get(&target_id) {
+                        let _ = context.event_sender.send(event.clone());
+                    }
+                }
 
-                self.plugins.insert(plugin.name.clone(), plugin);
+                let plugin_name = plugin.name.clone();
+                self.plugins.insert(plugin_name.clone(), plugin);
+                self.registered_by
+                    .insert(plugin_name, connection_id.to_string());
                 Response::success()
             }
             Request::Deregister { name } => match self.plugins.remove(&name) {
@@ -37,8 +47,14 @@ impl Daemon {
                         data: json!({"name": name}),
                         timestamp: Some(SystemTime::now()),
                     };
-                    self.event_bus.publish(event, &self.connections);
+                    let targets = self.event_bus.publish(&event);
+                    for target_id in targets {
+                        if let Some(context) = self.connections.get(&target_id) {
+                            let _ = context.event_sender.send(event.clone());
+                        }
+                    }
                     self.event_bus.remove_plugin(&name);
+                    self.registered_by.remove(&name);
 
                     Response::success()
                 }
@@ -54,24 +70,31 @@ impl Daemon {
             },
             Request::Subscribe { topics } => {
                 if let Some(context) = self.connections.get(connection_id) {
-                    if let Some(plugin_name) = &context.plugin_name {
-                        self.event_bus.subscribe(plugin_name, topics);
-                        Response::success()
-                    } else {
-                        Response::error("Must register plugin before subscribing to events")
+                    let plugin_name = context
+                        .plugin_name
+                        .clone()
+                        .unwrap_or_else(|| format!("sub-{}", connection_id));
+                    self.event_bus
+                        .subscribe(&plugin_name, connection_id, topics);
+                    // Also set the synthetic plugin name on the context so events can be routed
+                    if context.plugin_name.is_none() {
+                        if let Some(ctx) = self.connections.get_mut(connection_id) {
+                            ctx.plugin_name = Some(plugin_name);
+                        }
                     }
+                    Response::success()
                 } else {
                     Response::error("Connection not found")
                 }
             }
             Request::Unsubscribe { topics } => {
                 if let Some(context) = self.connections.get(connection_id) {
-                    if let Some(plugin_name) = &context.plugin_name {
-                        self.event_bus.unsubscribe(plugin_name, &topics);
-                        Response::success()
-                    } else {
-                        Response::error("Must register plugin before unsubscribing from events")
-                    }
+                    let plugin_name = context
+                        .plugin_name
+                        .clone()
+                        .unwrap_or_else(|| format!("sub-{}", connection_id));
+                    self.event_bus.unsubscribe(&plugin_name, &topics);
+                    Response::success()
                 } else {
                     Response::error("Connection not found")
                 }
@@ -92,7 +115,12 @@ impl Daemon {
                     data,
                     timestamp: Some(SystemTime::now()),
                 };
-                self.event_bus.publish(event, &self.connections);
+                let targets = self.event_bus.publish(&event);
+                for target_id in targets {
+                    if let Some(context) = self.connections.get(&target_id) {
+                        let _ = context.event_sender.send(event.clone());
+                    }
+                }
                 Response::success()
             }
             Request::GetHealth => {

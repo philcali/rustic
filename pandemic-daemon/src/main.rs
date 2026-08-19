@@ -44,7 +44,7 @@ async fn main() -> Result<()> {
 
         let event_rx = {
             let mut daemon_guard = daemon.lock().await;
-            daemon_guard.add_connection(connection_id.clone())
+            daemon_guard.add_connection(connection_id.clone(), true)
         };
 
         let daemon_clone = Arc::clone(&daemon);

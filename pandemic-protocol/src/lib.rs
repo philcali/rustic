@@ -226,7 +226,7 @@ impl Response {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json;
+
     use std::collections::HashMap;
 
     #[test]
