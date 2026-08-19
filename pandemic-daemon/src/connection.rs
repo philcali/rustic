@@ -50,7 +50,8 @@ pub async fn handle_connection(
             }
             event = event_rx.recv() => {
                 if let Some(event) = event {
-                    let event_json = serde_json::to_string(&Message::Event(event))?;
+                    let event_json = serde_json::to_string(&Message::Event(event.clone()))?;
+                    eprintln!("[CONN {}] Sending event: {} topic={}", connection_id, event_json, event.topic);
                     if let Err(e) = reader.get_mut().write_all(event_json.as_bytes()).await {
                         warn!("Failed to send event: {}", e);
                         break;

@@ -10,14 +10,25 @@ use crate::event_bus::EventBus;
 pub struct ConnectionContext {
     pub plugin_name: Option<String>,
     pub event_sender: mpsc::UnboundedSender<Event>,
+    /// If true, closing this connection should trigger plugin deregistration.
+    pub persistent: bool,
 }
 
 pub struct Daemon {
     pub plugins: HashMap<String, PluginInfo>,
     pub event_bus: EventBus,
     pub connections: HashMap<String, ConnectionContext>,
+    /// Maps plugin name to the connection ID that registered it.
+    /// Used to determine if deregistration should happen on connection close.
+    pub registered_by: HashMap<String, String>,
     start_time: SystemTime,
     system: System,
+}
+
+impl Default for Daemon {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Daemon {
@@ -26,6 +37,7 @@ impl Daemon {
             plugins: HashMap::new(),
             event_bus: EventBus::new(),
             connections: HashMap::new(),
+            registered_by: HashMap::new(),
             start_time: SystemTime::now(),
             system: System::new_all(),
         }
@@ -61,11 +73,16 @@ impl Daemon {
         }
     }
 
-    pub fn add_connection(&mut self, connection_id: String) -> mpsc::UnboundedReceiver<Event> {
+    pub fn add_connection(
+        &mut self,
+        connection_id: String,
+        persistent: bool,
+    ) -> mpsc::UnboundedReceiver<Event> {
         let (tx, rx) = mpsc::unbounded_channel();
         let context = ConnectionContext {
             plugin_name: None,
             event_sender: tx,
+            persistent,
         };
         self.connections.insert(connection_id, context);
         rx
@@ -73,10 +90,29 @@ impl Daemon {
 
     pub fn remove_connection(&mut self, connection_id: &str) {
         if let Some(context) = self.connections.remove(connection_id) {
-            if let Some(plugin_name) = &context.plugin_name {
-                if self.event_bus.subscribers.contains_key(plugin_name) {
-                    self.event_bus.remove_plugin(plugin_name);
-                    self.plugins.remove(plugin_name);
+            if let Some(plugin_name) = context.plugin_name.clone() {
+                // Only deregister if this was a persistent connection that registered the plugin
+                let registered =
+                    self.registered_by.get(&plugin_name).map(|s| s.as_str()) == Some(connection_id);
+                if context.persistent && registered {
+                    self.registered_by.remove(&plugin_name);
+
+                    // Publish deregister event BEFORE removing from event bus
+                    let deregister_event = Event {
+                        topic: "plugin.deregistered".to_string(),
+                        source: "pandemic".to_string(),
+                        data: serde_json::json!({ "plugin": plugin_name.clone() }),
+                        timestamp: Some(SystemTime::now()),
+                    };
+                    let targets = self.event_bus.publish(&deregister_event);
+                    for target_id in targets {
+                        if let Some(context) = self.connections.get(&target_id) {
+                            let _ = context.event_sender.send(deregister_event.clone());
+                        }
+                    }
+
+                    self.event_bus.remove_plugin(&plugin_name);
+                    self.plugins.remove(&plugin_name);
                     info!(
                         "Removed plugin {} due to persistent connection close",
                         plugin_name
