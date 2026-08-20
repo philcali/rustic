@@ -10,8 +10,8 @@ Planned improvements for the Pandemic codebase.
 
 ## Correctness
 
-- [ ] **Timestamp deserialization is a no-op** — `pandemic-protocol` custom deserializer for `SystemTime` ignores input and returns `now()`. Any deserialized `PluginInfo` will have a fake `registered_at`.
-- [ ] **`PersistentClient::register_and_keep_alive` makes the connection unusable** — it loops reading events forever, so you can't send requests on the same connection after calling it. The `send_request` method works fine separately.
+- [x] **Timestamp deserialization is a no-op** — Fixed: deserializer now properly parses `%Y-%m-%d %H:%M:%S UTC` strings back into `SystemTime`. Added round-trip test.
+- [x] **`PersistentClient::register_and_keep_alive` makes the connection unusable** — Fixed: removed the method entirely. Updated `hello-infection` example to show the correct pattern (connect → register → subscribe → event loop via `read_event()`).
 
 ## Architecture / Performance
 

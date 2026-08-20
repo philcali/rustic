@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::Parser;
 use pandemic_common::DaemonClient;
-use pandemic_protocol::PluginInfo;
+use pandemic_protocol::{PluginInfo, Request, Response};
 use std::collections::HashMap;
 use std::env;
 use std::path::PathBuf;
@@ -32,10 +32,28 @@ async fn main() -> Result<()> {
     };
 
     let mut client = DaemonClient::connect(&args.socket_path).await?;
-    info!("Connected to daemon, registering and keeping connection alive...");
+    info!("Connected to daemon, registering...");
 
-    // This will register and keep the connection alive
-    client.register_and_keep_alive(plugin).await?;
+    // Register the plugin
+    let response = client
+        .send_request(&Request::Register {
+            plugin: plugin.clone(),
+        })
+        .await?;
+    if let Response::Success { .. } = &response {
+        info!("Registered plugin");
+    } else {
+        anyhow::bail!("Registration failed: {:?}", response);
+    }
 
-    Ok(())
+    // Subscribe to events
+    client.subscribe(vec!["*".to_string()]).await?;
+    info!("Subscribed to all events");
+
+    // Event loop — keeps the connection alive
+    loop {
+        if let Some(event) = client.read_event().await? {
+            info!("Received event: {:?}", event);
+        }
+    }
 }

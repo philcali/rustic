@@ -30,7 +30,13 @@ mod time_format {
     {
         let opt: Option<String> = Option::deserialize(deserializer)?;
         match opt {
-            Some(_) => Ok(Some(SystemTime::now())), // Simplified for now
+            Some(s) => {
+                let naive = chrono::NaiveDateTime::parse_from_str(&s, "%Y-%m-%d %H:%M:%S UTC")
+                    .map_err(|e| serde::de::Error::custom(format!("invalid timestamp: {e}")))?;
+                let datetime =
+                    chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(naive, chrono::Utc);
+                Ok(Some(datetime.into()))
+            }
             None => Ok(None),
         }
     }
@@ -382,19 +388,30 @@ mod tests {
     }
 
     #[test]
-    fn test_timestamp_serialization() {
+    fn test_timestamp_serialization_roundtrip() {
+        let original_time = SystemTime::now();
         let plugin = PluginInfo {
             name: "test".to_string(),
             version: "1.0.0".to_string(),
             description: None,
             config: None,
-            registered_at: Some(SystemTime::now()),
+            registered_at: Some(original_time),
         };
 
         let json = serde_json::to_string(&plugin).unwrap();
         assert!(json.contains("UTC"));
 
-        // Should deserialize without error
-        let _: PluginInfo = serde_json::from_str(&json).unwrap();
+        let deserialized: PluginInfo = serde_json::from_str(&json).unwrap();
+
+        // The deserialized time should be close to the original (within 1 second
+        // since the serializer truncates to whole seconds).
+        let deserialized_time = deserialized.registered_at.unwrap();
+        let diff = deserialized_time
+            .duration_since(original_time)
+            .unwrap_or(original_time.duration_since(deserialized_time).unwrap());
+        assert!(
+            diff.as_secs() <= 1,
+            "Timestamp mismatch: original={original_time:?}, deserialized={deserialized_time:?}"
+        );
     }
 }

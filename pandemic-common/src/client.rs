@@ -4,7 +4,6 @@ use std::path::Path;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
-use tracing::info;
 
 pub struct DaemonClient;
 
@@ -102,28 +101,6 @@ impl PersistentClient {
         } else {
             None
         }
-    }
-
-    pub async fn register_and_keep_alive(
-        &mut self,
-        plugin_info: pandemic_protocol::PluginInfo,
-    ) -> Result<()> {
-        let request = Request::Register {
-            plugin: plugin_info,
-        };
-        let _response = self.send_request(&request).await?;
-
-        // Keep connection alive by reading events
-        let mut line = String::new();
-        while self.stream.read_line(&mut line).await? > 0 {
-            if let Ok(Message::Event(event)) = serde_json::from_str::<Message>(line.trim()) {
-                // Handle incoming events (plugins can override this behavior)
-                info!("Received event: {:?}", event);
-            }
-            line.clear();
-        }
-
-        Ok(())
     }
 }
 
