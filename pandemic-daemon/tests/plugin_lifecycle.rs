@@ -238,8 +238,8 @@ async fn plugin_registered_at_is_set() {
         Response::Success { data } => {
             let got: serde_json::Value = data.unwrap();
             assert!(
-                got["registered_at"].is_string(),
-                "registered_at should be a formatted string, got: {}",
+                got["registered_at"].is_number(),
+                "registered_at should be a unix timestamp (number), got: {}",
                 got["registered_at"]
             );
         }

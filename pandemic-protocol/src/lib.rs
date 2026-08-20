@@ -13,12 +13,7 @@ mod time_format {
         match time {
             Some(t) => {
                 let duration = t.duration_since(UNIX_EPOCH).unwrap();
-                let datetime =
-                    chrono::DateTime::<chrono::Utc>::from_timestamp(duration.as_secs() as i64, 0)
-                        .unwrap()
-                        .format("%Y-%m-%d %H:%M:%S UTC")
-                        .to_string();
-                serializer.serialize_str(&datetime)
+                serializer.serialize_u64(duration.as_secs())
             }
             None => serializer.serialize_none(),
         }
@@ -28,14 +23,11 @@ mod time_format {
     where
         D: Deserializer<'de>,
     {
-        let opt: Option<String> = Option::deserialize(deserializer)?;
+        let opt: Option<u64> = Option::deserialize(deserializer)?;
         match opt {
-            Some(s) => {
-                let naive = chrono::NaiveDateTime::parse_from_str(&s, "%Y-%m-%d %H:%M:%S UTC")
-                    .map_err(|e| serde::de::Error::custom(format!("invalid timestamp: {e}")))?;
-                let datetime =
-                    chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(naive, chrono::Utc);
-                Ok(Some(datetime.into()))
+            Some(secs) => {
+                let time = UNIX_EPOCH + std::time::Duration::from_secs(secs);
+                Ok(Some(time))
             }
             None => Ok(None),
         }
@@ -399,7 +391,8 @@ mod tests {
         };
 
         let json = serde_json::to_string(&plugin).unwrap();
-        assert!(json.contains("UTC"));
+        // Timestamp is now serialized as unix seconds (integer)
+        assert!(json.contains("registered_at"));
 
         let deserialized: PluginInfo = serde_json::from_str(&json).unwrap();
 
