@@ -98,15 +98,15 @@ impl AgentClient {
 
         // Compute HMAC-SHA256 signature
         let mut mac: hmac::Hmac<sha2::Sha256> =
-            <hmac::Hmac<sha2::Sha256> as sha2::digest::KeyInit>::new_from_slice(self.secret.as_bytes())?;
+            <hmac::Hmac<sha2::Sha256> as sha2::digest::KeyInit>::new_from_slice(
+                self.secret.as_bytes(),
+            )?;
         mac.update(nonce.as_bytes());
         let signature = hex::encode(mac.finalize().into_bytes());
 
         // Send auth response
-        let response = AgentMessage::AuthResponse(pandemic_protocol::AuthResponse {
-            nonce,
-            signature,
-        });
+        let response =
+            AgentMessage::AuthResponse(pandemic_protocol::AuthResponse { nonce, signature });
         let response_json = serde_json::to_string(&response)?;
         stream.write_all(response_json.as_bytes()).await?;
         stream.write_all(b"\n").await?;

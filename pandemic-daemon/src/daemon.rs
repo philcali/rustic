@@ -1,3 +1,4 @@
+use chrono::Utc;
 use pandemic_protocol::{Event, HealthMetrics, PluginInfo};
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime};
@@ -102,7 +103,7 @@ impl Daemon {
                         topic: "plugin.deregistered".to_string(),
                         source: "pandemic".to_string(),
                         data: serde_json::json!({ "plugin": plugin_name.clone() }),
-                        timestamp: Some(SystemTime::now()),
+                        timestamp: Some(Utc::now()),
                     };
                     let targets = self.event_bus.publish(&deregister_event);
                     for target_id in targets {

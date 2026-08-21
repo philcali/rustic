@@ -18,8 +18,8 @@ Planned improvements for the Pandemic codebase.
 - [ ] **Daemon serializes all operations** on a single `Arc<Mutex<Daemon>>`. For many concurrent plugins this is a bottleneck. Consider per-plugin state or fine-grained locking.
 - [x] **EventBus publish is O(n)** — iterates all connections to find matching ones. Maintain a reverse index from plugin_name to connection_ids for O(1) lookup.
 - [ ] **No config file for the daemon** — only a CLI flag for socket path. No way to configure health check intervals, max plugins, or logging.
-- [x] **`pandemic-protocol` depends on `chrono`** for timestamp formatting. Consider serializing as unix timestamp (integer) to drop the dependency.
-- [ ] **`pandemic-proxy` lists `chrono` in Cargo.toml** but doesn't appear to use it — dead dependency.
+- [x] **`pandemic-protocol` depends on `chrono`** for timestamp formatting. Switched all crates to `chrono::DateTime<Utc>` with RFC3339 serialization for consistency across the codebase.
+- [x] **`pandemic-proxy` lists `chrono` in Cargo.toml** but doesn't appear to use it — dead dependency. Fixed: switched the entire codebase to use `chrono::DateTime<Utc>` with RFC3339 serialization for timestamp consistency.
 - [ ] **No graceful shutdown** in the daemon — `while let Ok((stream, _)) = listener.accept().await` with no signal handling. No plugin deregistration events or socket cleanup on exit.
 
 ## Testing

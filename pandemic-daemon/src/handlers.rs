@@ -1,6 +1,6 @@
+use chrono::Utc;
 use pandemic_protocol::{Event, Request, Response};
 use serde_json::json;
-use std::time::SystemTime;
 use tracing::info;
 
 use crate::daemon::Daemon;
@@ -10,7 +10,7 @@ impl Daemon {
         match request {
             Request::Register { mut plugin } => {
                 info!("Registering plugin: {}", plugin.name);
-                plugin.registered_at = Some(SystemTime::now());
+                plugin.registered_at = Some(Utc::now());
 
                 if let Some(context) = self.connections.get_mut(connection_id) {
                     context.plugin_name = Some(plugin.name.clone());
@@ -20,7 +20,7 @@ impl Daemon {
                     topic: "plugin.registered".to_string(),
                     source: "pandemic".to_string(),
                     data: json!(plugin),
-                    timestamp: Some(SystemTime::now()),
+                    timestamp: Some(Utc::now()),
                 };
                 self.event_bus
                     .register_connection(&plugin.name, connection_id);
@@ -45,7 +45,7 @@ impl Daemon {
                         topic: "plugin.deregistered".to_string(),
                         source: "pandemic".to_string(),
                         data: json!({"name": name}),
-                        timestamp: Some(SystemTime::now()),
+                        timestamp: Some(Utc::now()),
                     };
                     let targets = self.event_bus.publish(&event);
                     for target_id in targets {
@@ -113,7 +113,7 @@ impl Daemon {
                     topic,
                     source,
                     data,
-                    timestamp: Some(SystemTime::now()),
+                    timestamp: Some(Utc::now()),
                 };
                 let targets = self.event_bus.publish(&event);
                 for target_id in targets {

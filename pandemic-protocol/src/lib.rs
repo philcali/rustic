@@ -1,33 +1,30 @@
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::time::SystemTime;
 
 mod time_format {
+    use chrono::{DateTime, Utc};
     use serde::{Deserialize, Deserializer, Serializer};
-    use std::time::{SystemTime, UNIX_EPOCH};
 
-    pub fn serialize<S>(time: &Option<SystemTime>, serializer: S) -> Result<S::Ok, S::Error>
+    pub fn serialize<S>(time: &Option<DateTime<Utc>>, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
         match time {
-            Some(t) => {
-                let duration = t.duration_since(UNIX_EPOCH).unwrap();
-                serializer.serialize_u64(duration.as_secs())
-            }
+            Some(t) => serializer.serialize_str(&t.to_rfc3339()),
             None => serializer.serialize_none(),
         }
     }
 
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<SystemTime>, D::Error>
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<DateTime<Utc>>, D::Error>
     where
         D: Deserializer<'de>,
     {
-        let opt: Option<u64> = Option::deserialize(deserializer)?;
+        let opt: Option<String> = Option::deserialize(deserializer)?;
         match opt {
-            Some(secs) => {
-                let time = UNIX_EPOCH + std::time::Duration::from_secs(secs);
-                Ok(Some(time))
+            Some(s) => {
+                let dt = DateTime::parse_from_rfc3339(&s).map_err(serde::de::Error::custom)?;
+                Ok(Some(dt.with_timezone(&Utc)))
             }
             None => Ok(None),
         }
@@ -56,7 +53,7 @@ pub struct PluginInfo {
     pub description: Option<String>,
     pub config: Option<HashMap<String, String>>,
     #[serde(with = "time_format")]
-    pub registered_at: Option<SystemTime>,
+    pub registered_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -202,7 +199,7 @@ pub struct Event {
     pub topic: String,
     pub source: String,
     pub data: serde_json::Value,
-    pub timestamp: Option<SystemTime>,
+    pub timestamp: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -395,7 +392,7 @@ mod tests {
 
     #[test]
     fn test_timestamp_serialization_roundtrip() {
-        let original_time = SystemTime::now();
+        let original_time = Utc::now();
         let plugin = PluginInfo {
             name: "test".to_string(),
             version: "1.0.0".to_string(),
@@ -405,20 +402,19 @@ mod tests {
         };
 
         let json = serde_json::to_string(&plugin).unwrap();
-        // Timestamp is now serialized as unix seconds (integer)
+        // Timestamp is now serialized as RFC3339 string
         assert!(json.contains("registered_at"));
 
         let deserialized: PluginInfo = serde_json::from_str(&json).unwrap();
 
-        // The deserialized time should be close to the original (within 1 second
-        // since the serializer truncates to whole seconds).
         let deserialized_time = deserialized.registered_at.unwrap();
         let diff = deserialized_time
-            .duration_since(original_time)
-            .unwrap_or(original_time.duration_since(deserialized_time).unwrap());
+            .signed_duration_since(original_time)
+            .to_std()
+            .unwrap();
         assert!(
             diff.as_secs() <= 1,
-            "Timestamp mismatch: original={original_time:?}, deserialized={deserialized_time:?}"
+            "Timestamp mismatch: original={original_time}, deserialized={deserialized_time}"
         );
     }
 }

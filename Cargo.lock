@@ -1409,6 +1409,7 @@ name = "pandemic-daemon"
 version = "0.4.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "clap",
  "pandemic-protocol",
  "serde",
@@ -1456,6 +1457,7 @@ dependencies = [
 name = "pandemic-protocol"
 version = "0.4.0"
 dependencies = [
+ "chrono",
  "serde",
  "serde_json",
  "sysinfo",

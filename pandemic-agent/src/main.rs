@@ -5,8 +5,8 @@ mod users;
 
 use anyhow::Result;
 use clap::Parser;
-use pandemic_protocol::{AgentMessage, AuthChallenge, Response};
 use hmac::{Hmac, Mac};
+use pandemic_protocol::{AgentMessage, AuthChallenge, Response};
 use sha2::Sha256;
 use std::path::PathBuf;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -100,10 +100,7 @@ async fn main() -> Result<()> {
     }
 }
 
-async fn handle_connection(
-    mut stream: UnixStream,
-    secret: String,
-) -> Result<()> {
+async fn handle_connection(mut stream: UnixStream, secret: String) -> Result<()> {
     let (reader, mut writer) = stream.split();
     let mut buf_reader = BufReader::new(reader);
     let mut line = String::new();
