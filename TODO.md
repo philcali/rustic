@@ -4,8 +4,8 @@ Planned improvements for the Pandemic codebase.
 
 ## Security
 
-- [ ] **Default auth keys** — REST API generates known default keys (`pandemic-admin-key-change-me`). Should either refuse to start until keys are configured, or generate random keys on first run and log them.
-- [ ] **Agent authorization** — `pandemic-agent` has broad root privileges (user/group management, systemd control) with no per-operation authorization. Consider scope-based permissions on the admin socket.
+- [x] **Default auth keys** — Fixed: generates random 32-char keys on first run and logs them with `error!` (red) so they're hard to miss. Keys are written to the config file and won't be displayed again.
+- [x] **Agent authorization** — `pandemic-agent` now requires a challenge-response handshake: agent sends a random nonce on connect, client must respond with HMAC-SHA256(nonce, shared_secret). Agent requires `--secret`/`--secret-path`; REST API requires `--agent-secret`/`--agent-secret-path`. Socket access alone no longer grants root. Scope-based logical authorization is a future phase.
 - [x] **IAM example config** — `pandemic-iam/example-config.toml` has hardcoded placeholder ARNs (`123456789012`) that could be copy-pasted into production. Make it a template requiring explicit input.
 
 ## Correctness

@@ -53,24 +53,72 @@ impl Default for AgentStatus {
 
 pub struct AgentClient {
     socket_path: PathBuf,
+    secret: String,
 }
 
 impl AgentClient {
     pub fn new() -> Self {
         Self {
             socket_path: PathBuf::from(AGENT_SOCKET_PATH),
+            secret: String::new(),
         }
     }
 
     pub fn with_socket_path<P: AsRef<Path>>(path: P) -> Self {
         Self {
             socket_path: path.as_ref().to_path_buf(),
+            secret: String::new(),
         }
+    }
+
+    pub fn with_secret<S: Into<String>>(mut self, secret: S) -> Self {
+        self.secret = secret.into();
+        self
+    }
+
+    pub fn with_secret_path<P: AsRef<Path>>(mut self, path: P) -> Result<Self> {
+        self.secret = std::fs::read_to_string(path)?;
+        Ok(self)
+    }
+
+    async fn authenticate(&self, mut stream: UnixStream) -> Result<UnixStream> {
+        use hmac::Mac;
+
+        // Read auth challenge
+        let mut line = String::new();
+        tokio::io::BufReader::new(&mut stream)
+            .read_line(&mut line)
+            .await?;
+        let challenge: AgentMessage = serde_json::from_str(line.trim())?;
+
+        let nonce = match challenge {
+            AgentMessage::AuthChallenge(ch) => ch.nonce,
+            _ => return Err(anyhow::anyhow!("Expected AuthChallenge from agent")),
+        };
+
+        // Compute HMAC-SHA256 signature
+        let mut mac: hmac::Hmac<sha2::Sha256> =
+            <hmac::Hmac<sha2::Sha256> as sha2::digest::KeyInit>::new_from_slice(self.secret.as_bytes())?;
+        mac.update(nonce.as_bytes());
+        let signature = hex::encode(mac.finalize().into_bytes());
+
+        // Send auth response
+        let response = AgentMessage::AuthResponse(pandemic_protocol::AuthResponse {
+            nonce,
+            signature,
+        });
+        let response_json = serde_json::to_string(&response)?;
+        stream.write_all(response_json.as_bytes()).await?;
+        stream.write_all(b"\n").await?;
+        stream.flush().await?;
+
+        Ok(stream)
     }
 
     pub async fn connect(&self) -> Result<UnixStream> {
         let stream = UnixStream::connect(&self.socket_path).await?;
-        Ok(stream)
+        let authenticated = self.authenticate(stream).await?;
+        Ok(authenticated)
     }
 
     pub async fn send_agent_request(&self, request: &AgentRequest) -> Result<Response> {

@@ -47,6 +47,12 @@ struct Args {
 
     #[arg(long, default_value = "/etc/pandemic/rest-auth.toml")]
     auth_config: PathBuf,
+
+    #[arg(long)]
+    agent_secret: Option<String>,
+
+    #[arg(long)]
+    agent_secret_path: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -91,11 +97,23 @@ async fn main() -> Result<()> {
 
     info!("Registered with pandemic daemon");
 
+    // Resolve agent secret
+    let agent_secret = match (&args.agent_secret, &args.agent_secret_path) {
+        (Some(s), _) => s.clone(),
+        (None, Some(path)) => tokio::fs::read_to_string(path).await?,
+        (None, None) => {
+            return Err(anyhow::anyhow!(
+                "Agent secret is required. Provide it via --agent-secret or --agent-secret-path"
+            ));
+        }
+    };
+
     // Set up application state
     let state = AppState {
         socket_path: args.socket_path,
         auth_config,
         agent_status: Arc::new(Mutex::new(AgentStatus::new())),
+        agent_secret,
     };
 
     // Build the router with auth-protected routes
@@ -170,13 +188,27 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+fn generate_api_key() -> String {
+    use rand::distributions::Alphanumeric;
+    use rand::Rng;
+    rand::thread_rng()
+        .sample_iter(&Alphanumeric)
+        .take(32)
+        .map(char::from)
+        .collect()
+}
+
 async fn create_default_auth_config(path: &PathBuf) -> Result<()> {
-    let default_config = r#"[identities.admin]
-api_key = "pandemic-admin-key-change-me"
+    let admin_key = generate_api_key();
+    let reader_key = generate_api_key();
+
+    let default_config = format!(
+        r#"[identities.admin]
+api_key = "{}"
 roles = ["admin"]
 
 [identities.reader]
-api_key = "pandemic-reader-key-change-me"
+api_key = "{}"
 roles = ["reader"]
 
 [roles.admin]
@@ -184,15 +216,29 @@ scopes = ["*"]
 
 [roles.reader]
 scopes = ["plugins:read", "health:read", "events:subscribe"]
-"#;
+"#,
+        admin_key, reader_key
+    );
 
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
 
-    tokio::fs::write(path, default_config).await?;
-    info!("Created default auth config at {:?}", path);
-    info!("WARNING: Please change the default API keys!");
+    tokio::fs::write(path, &default_config).await?;
+    info!("Generated default auth config at {:?}", path);
+    error!(
+        "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+ WARN: Random API keys have been generated and written to {:?}.
+       You MUST save these keys — they will not be displayed again.
+
+ admin key: {}
+reader key: {}
+
+       If you lose these keys, you'll need to delete the config file
+       and restart to regenerate them.
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
+        path, admin_key, reader_key
+    );
 
     Ok(())
 }

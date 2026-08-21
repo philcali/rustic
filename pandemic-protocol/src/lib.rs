@@ -177,10 +177,24 @@ pub enum Message {
     Event(Event),
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthChallenge {
+    pub nonce: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthResponse {
+    pub nonce: String,
+    pub signature: String,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type")]
 pub enum AgentMessage {
     Request(AgentRequest),
     Response(Response),
+    AuthChallenge(AuthChallenge),
+    AuthResponse(AuthResponse),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

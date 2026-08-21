@@ -19,3 +19,8 @@ tracing-subscriber = { workspace = true }
 libc = "0.2"
 toml = "0.8"
 pandemic-common = { path = "../pandemic-common" }
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"
+rand = "0.8"
+subtle = "2.6"

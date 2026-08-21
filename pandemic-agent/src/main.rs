@@ -5,7 +5,9 @@ mod users;
 
 use anyhow::Result;
 use clap::Parser;
-use pandemic_protocol::{AgentMessage, Response};
+use pandemic_protocol::{AgentMessage, AuthChallenge, Response};
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
 use std::path::PathBuf;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
@@ -26,6 +28,12 @@ pub struct Args {
 
     #[arg(long, default_value = "pandemic")]
     pub group: String,
+
+    #[arg(long)]
+    pub secret: Option<String>,
+
+    #[arg(long)]
+    pub secret_path: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -58,11 +66,32 @@ async fn main() -> Result<()> {
 
     info!("Agent listening on {:?}", args.socket_path);
 
+    // Resolve shared secret
+    let secret = match (&args.secret, &args.secret_path) {
+        (Some(s), _) => s.clone(),
+        (None, Some(path)) => tokio::fs::read_to_string(path).await?,
+        (None, None) => {
+            let secret = hex::encode(rand::random::<[u8; 32]>());
+            error!(
+                "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+ WARN: No agent secret configured. A random secret was generated.
+       You MUST save this secret and pass it via --secret or --secret-path
+       on subsequent runs, or clients will be unable to authenticate.
+
+ agent secret: {}
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
+                secret
+            );
+            secret
+        }
+    };
+
     // Accept connections
     loop {
         match listener.accept().await {
             Ok((stream, _)) => {
-                tokio::spawn(handle_connection(stream));
+                let secret = secret.clone();
+                tokio::spawn(handle_connection(stream, secret));
             }
             Err(e) => {
                 error!("Failed to accept connection: {}", e);
@@ -71,11 +100,62 @@ async fn main() -> Result<()> {
     }
 }
 
-async fn handle_connection(mut stream: UnixStream) -> Result<()> {
+async fn handle_connection(
+    mut stream: UnixStream,
+    secret: String,
+) -> Result<()> {
     let (reader, mut writer) = stream.split();
     let mut buf_reader = BufReader::new(reader);
     let mut line = String::new();
 
+    // Send auth challenge
+    let nonce = hex::encode(rand::random::<[u8; 16]>());
+    let challenge = AgentMessage::AuthChallenge(AuthChallenge {
+        nonce: nonce.clone(),
+    });
+    let challenge_json = serde_json::to_string(&challenge)?;
+    writer.write_all(challenge_json.as_bytes()).await?;
+    writer.write_all(b"\n").await?;
+    writer.flush().await?;
+
+    // Wait for auth response
+    line.clear();
+    buf_reader.read_line(&mut line).await?;
+    let trimmed = line.trim().to_string();
+    line.clear();
+
+    let auth_response = match serde_json::from_str::<AgentMessage>(&trimmed) {
+        Ok(AgentMessage::AuthResponse(resp)) => resp,
+        _ => {
+            warn!("Authentication failed: expected AuthResponse");
+            return Ok(());
+        }
+    };
+
+    // Verify HMAC-SHA256 signature
+    let mut mac: Hmac<Sha256> = Hmac::new_from_slice(secret.as_bytes())?;
+    mac.update(auth_response.nonce.as_bytes());
+    let expected = mac.finalize().into_bytes();
+
+    // Decode the received signature from hex
+    let sig_bytes = match hex::decode(&auth_response.signature) {
+        Ok(b) => b,
+        Err(_) => {
+            warn!("Authentication failed: invalid hex signature");
+            return Ok(());
+        }
+    };
+
+    // Constant-time comparison to prevent timing attacks
+    let equal: bool = subtle::ConstantTimeEq::ct_eq(&expected[..], &sig_bytes).into();
+    if !equal {
+        warn!("Authentication failed: invalid signature");
+        return Ok(());
+    }
+
+    info!("Authenticated client connected");
+
+    // Process normal requests
     while buf_reader.read_line(&mut line).await? > 0 {
         let trimmed = line.trim();
         if trimmed.is_empty() {

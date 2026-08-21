@@ -33,6 +33,7 @@ pub struct AppState {
     pub socket_path: PathBuf,
     pub auth_config: AuthConfig,
     pub agent_status: Arc<Mutex<AgentStatus>>,
+    pub agent_secret: String,
 }
 
 pub type ApiResult = Result<Json<Value>, (StatusCode, Json<Value>)>;
@@ -143,7 +144,7 @@ pub async fn list_system_services(
     require_scope!(&state.auth_config, &scopes, "admin");
 
     let request = AgentRequest::ListServices;
-    let agent_client = AgentClient::default();
+    let agent_client = AgentClient::new().with_secret(&state.agent_secret);
     let response = agent_client.send_agent_request(&request);
     format_pandemic_response(response.await)
 }
@@ -160,7 +161,7 @@ pub async fn get_system_service(
         service: name,
     };
 
-    let agent_client = AgentClient::default();
+    let agent_client = AgentClient::new().with_secret(&state.agent_secret);
     let response = agent_client.send_agent_request(&request);
     format_pandemic_response(response.await)
 }
@@ -183,7 +184,7 @@ pub async fn control_system_service(
         service: name,
     };
 
-    let agent_client = AgentClient::default();
+    let agent_client = AgentClient::new().with_secret(&state.agent_secret);
     let response = agent_client.send_agent_request(&request);
     format_pandemic_response(response.await)
 }
@@ -196,7 +197,7 @@ pub async fn list_users(
     require_scope!(&state.auth_config, &scopes, "admin");
 
     let request = AgentRequest::ListUsers;
-    let agent_client = AgentClient::default();
+    let agent_client = AgentClient::new().with_secret(&state.agent_secret);
     let response = agent_client.send_agent_request(&request);
     format_pandemic_response(response.await)
 }
@@ -212,7 +213,7 @@ pub async fn create_user(
         username: payload.username,
         config: payload.config,
     };
-    let agent_client = AgentClient::default();
+    let agent_client = AgentClient::new().with_secret(&state.agent_secret);
     let response = agent_client.send_agent_request(&request);
     format_pandemic_response(response.await)
 }
@@ -231,7 +232,7 @@ pub async fn delete_user(
     require_scope!(&state.auth_config, &scopes, "admin");
 
     let request = AgentRequest::UserDelete { username };
-    let agent_client = AgentClient::default();
+    let agent_client = AgentClient::new().with_secret(&state.agent_secret);
     let response = agent_client.send_agent_request(&request);
     format_pandemic_response(response.await)
 }
@@ -245,7 +246,7 @@ pub async fn modify_user(
     require_scope!(&state.auth_config, &scopes, "admin");
 
     let request = AgentRequest::UserModify { username, config };
-    let agent_client = AgentClient::default();
+    let agent_client = AgentClient::new().with_secret(&state.agent_secret);
     let response = agent_client.send_agent_request(&request);
     format_pandemic_response(response.await)
 }
@@ -258,7 +259,7 @@ pub async fn list_groups(
     require_scope!(&state.auth_config, &scopes, "admin");
 
     let request = AgentRequest::ListGroups;
-    let agent_client = AgentClient::default();
+    let agent_client = AgentClient::new().with_secret(&state.agent_secret);
     let response = agent_client.send_agent_request(&request);
     format_pandemic_response(response.await)
 }
@@ -271,7 +272,7 @@ pub async fn create_group(
     require_scope!(&state.auth_config, &scopes, "admin");
 
     let request = AgentRequest::GroupCreate { groupname };
-    let agent_client = AgentClient::default();
+    let agent_client = AgentClient::new().with_secret(&state.agent_secret);
     let response = agent_client.send_agent_request(&request);
     format_pandemic_response(response.await)
 }
@@ -284,7 +285,7 @@ pub async fn delete_group(
     require_scope!(&state.auth_config, &scopes, "admin");
 
     let request = AgentRequest::GroupDelete { groupname };
-    let agent_client = AgentClient::default();
+    let agent_client = AgentClient::new().with_secret(&state.agent_secret);
     let response = agent_client.send_agent_request(&request);
     format_pandemic_response(response.await)
 }
@@ -300,7 +301,7 @@ pub async fn add_user_to_group(
         groupname,
         username,
     };
-    let agent_client = AgentClient::default();
+    let agent_client = AgentClient::new().with_secret(&state.agent_secret);
     let response = agent_client.send_agent_request(&request);
     format_pandemic_response(response.await)
 }
@@ -316,7 +317,7 @@ pub async fn remove_user_from_group(
         groupname,
         username,
     };
-    let agent_client = AgentClient::default();
+    let agent_client = AgentClient::new().with_secret(&state.agent_secret);
     let response = agent_client.send_agent_request(&request);
     format_pandemic_response(response.await)
 }
@@ -330,7 +331,7 @@ pub async fn get_service_config(
     require_scope!(&state.auth_config, &scopes, "admin");
 
     let request = AgentRequest::GetServiceConfig { service };
-    let agent_client = AgentClient::default();
+    let agent_client = AgentClient::new().with_secret(&state.agent_secret);
     let response = agent_client.send_agent_request(&request);
     format_pandemic_response(response.await)
 }
@@ -344,7 +345,7 @@ pub async fn set_service_config(
     require_scope!(&state.auth_config, &scopes, "admin");
 
     let request = AgentRequest::ServiceConfigOverride { service, overrides };
-    let agent_client = AgentClient::default();
+    let agent_client = AgentClient::new().with_secret(&state.agent_secret);
     let response = agent_client.send_agent_request(&request);
     format_pandemic_response(response.await)
 }
@@ -357,7 +358,7 @@ pub async fn reset_service_config(
     require_scope!(&state.auth_config, &scopes, "admin");
 
     let request = AgentRequest::ServiceConfigReset { service };
-    let agent_client = AgentClient::default();
+    let agent_client = AgentClient::new().with_secret(&state.agent_secret);
     let response = agent_client.send_agent_request(&request);
     format_pandemic_response(response.await)
 }
@@ -371,7 +372,7 @@ pub async fn search_infections(
 
     let query = params.get("q").unwrap_or(&String::new()).clone();
     let request = AgentRequest::SearchInfections { query };
-    let agent_client = AgentClient::default();
+    let agent_client = AgentClient::new().with_secret(&state.agent_secret);
     let response = agent_client.send_agent_request(&request);
     format_pandemic_response(response.await)
 }
@@ -384,7 +385,7 @@ pub async fn get_infection_manifest(
     require_scope!(&state.auth_config, &scopes, "admin");
 
     let request = AgentRequest::GetInfectionManifest { name };
-    let agent_client = AgentClient::default();
+    let agent_client = AgentClient::new().with_secret(&state.agent_secret);
     let response = agent_client.send_agent_request(&request);
     format_pandemic_response(response.await)
 }
@@ -406,7 +407,7 @@ pub async fn install_infection(
         name,
         target_path: payload.target_path,
     };
-    let agent_client = AgentClient::default();
+    let agent_client = AgentClient::new().with_secret(&state.agent_secret);
     let response = agent_client.send_agent_request(&request);
     format_pandemic_response(response.await)
 }
