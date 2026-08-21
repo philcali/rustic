@@ -27,6 +27,43 @@ Planned improvements for the Pandemic codebase.
 - [ ] **Integration tests missing** — no tests for daemon plugin lifecycle, event bus routing, connection handling, or client behavior.
 - [x] **`pandemic-common/src/tests.rs`** — declared as `mod tests` but unclear if it's compiled/run. Verify it exists and is exercised.
 
+## Testing Procedures
+
+### Local LAN testing (daemon + rest + console)
+
+All three services must be running with the same socket path. The console's frontend defaults its API URL to `http://<current-host>:8080`, so the REST server must be on port 8080.
+
+```bash
+# 1. Start daemon on a local socket
+mkdir -p /tmp/pandemic
+cargo run --release -p pandemic-daemon -- --socket-path /tmp/pandemic/pandemic.sock
+
+# 2. Start REST API (LAN-accessible)
+cargo run --release -p pandemic-rest -- \
+  --socket-path /tmp/pandemic/pandemic.sock \
+  --port 8080 \
+  --bind-address 0.0.0.0 \
+  --auth-config /tmp/pandemic/rest-auth.toml
+
+# 3. Start console (LAN-accessible)
+cargo run --release -p pandemic-console -- \
+  --socket-path /tmp/pandemic/pandemic.sock \
+  --port 3000 \
+  --bind-address 0.0.0.0
+
+# 4. Access from LAN: http://<server-ip>:3000
+#    Use API key: pandemic-admin-key-change-me
+```
+
+**Note:** If you change the console's frontend (web/src/), rebuild first:
+```bash
+cd pandemic-console/web && npm run build
+```
+
+**Common issues:**
+- **WebSocket errors** — ensure the `pandemic-api-url` isn't stale in browser localStorage. Clear it or re-enter the API key via the "Save" button.
+- **`window.location.host` vs `hostname`** — the API URL must use `hostname` (no port), not `host` (includes port), otherwise you get double-port URLs like `10.0.0.16:3000:8080`.
+
 ## Code Organization
 
-- [ ] **Web console is ~600 lines of vanilla JS** in a single file. Consider HTMX, Alpine.js, or splitting into modules for maintainability.
+- [x] **Web console is ~600 lines of vanilla JS** in a single file. Fixed: split into 9 focused ES modules (api, websocket, health, plugins, services, users, groups, registry, tabs) with main.js as a thin orchestrator (~300 lines). No new dependencies — Vite handles module resolution natively.
