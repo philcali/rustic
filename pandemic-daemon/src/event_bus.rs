@@ -104,6 +104,11 @@ impl EventBus {
             }
         }
 
+        // A connection can match both an exact topic and a wildcard
+        // (e.g. the auto `plugin.registered` subscription plus `*`); deliver once
+        let mut seen = std::collections::HashSet::new();
+        targets.retain(|id| seen.insert(id.clone()));
+
         targets
     }
 
