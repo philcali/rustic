@@ -21,7 +21,7 @@ All crates share version `0.4.0` and workspace dependencies defined in the root 
 | `pandemic-console` | Web dashboard (Vite + vanilla JS) — serves static SPA, registers as a plugin with the daemon |
 | `pandemic-udp` | UDP proxy — exposes the daemon's Unix socket over UDP |
 | `pandemic-iam` | IAM Anywhere integration (AWS Roles Anywhere) — certificate-based auth, credential rotation |
-| `pandemic-proxy` | Service wrapper — launches a config-specified process and registers it with the daemon |
+| `pandemic-proxy` | Service wrapper — either launches a config-specified process or attaches an existing systemd unit (`--attach`) and registers it with the daemon |
 | `examples/hello-infection` | Example infection plugin |
 
 ## Architecture

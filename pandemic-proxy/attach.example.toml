@@ -1,0 +1,18 @@
+# Attach an existing systemd service as an infection.
+#
+# Unlike `command`, the proxy spawns nothing — it registers the named unit
+# with the daemon and mirrors its health on the `health.<name>` topic.
+#
+# Usage:
+#   pandemic-proxy --config attach.example.toml
+#   pandemic-proxy --attach mosquitto --config attach.example.toml   # flag wins
+
+[infection]
+name = "mosquitto"
+version = "2.0.18"
+description = "Mosquitto MQTT broker (existing systemd service)"
+
+[runtime]
+attach = "mosquitto"
+# Default health check when attaching: ["systemctl", "is-active", "mosquitto"]
+health_interval = 30
