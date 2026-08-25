@@ -3,6 +3,7 @@ use pandemic_protocol::{AgentRequest, Response};
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
+use crate::infection::{attach_infection, detach_infection, AttachParams};
 use crate::systemd::{
     delete_service_override, execute_systemctl, get_service_override, list_pandemic_services,
     set_service_override,
@@ -200,6 +201,40 @@ pub async fn handle_agent_request(request: AgentRequest) -> Response {
                     "path": install_path
                 })),
                 Err(e) => Response::error(format!("Failed to install infection: {}", e)),
+            }
+        }
+
+        AgentRequest::AttachInfection {
+            unit,
+            name,
+            version,
+            description,
+            health_check,
+            health_interval,
+            proxy_path,
+        } => {
+            info!("Attaching infection from unit: {}", unit);
+            match attach_infection(&AttachParams {
+                unit,
+                name,
+                version,
+                description,
+                health_check,
+                health_interval,
+                proxy_path,
+            })
+            .await
+            {
+                Ok(result) => Response::success_with_data(result),
+                Err(e) => Response::error(format!("Failed to attach infection: {}", e)),
+            }
+        }
+
+        AgentRequest::DetachInfection { name } => {
+            info!("Detaching infection: {}", name);
+            match detach_infection(&name).await {
+                Ok(result) => Response::success_with_data(result),
+                Err(e) => Response::error(format!("Failed to detach infection: {}", e)),
             }
         }
 

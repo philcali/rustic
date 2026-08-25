@@ -2,6 +2,7 @@ mod agent;
 mod bootstrap;
 mod daemon;
 mod registry;
+mod secret;
 mod service;
 mod system;
 
@@ -174,6 +175,40 @@ enum ServiceAction {
         /// Service name
         name: String,
     },
+    /// Attach an existing systemd unit as an infection (via pandemic-agent)
+    Attach {
+        /// systemd unit to attach (e.g. mosquitto)
+        unit: String,
+        /// infection name (defaults to the unit's base name)
+        #[arg(long)]
+        name: Option<String>,
+        /// infection version recorded in the daemon
+        #[arg(long)]
+        version: Option<String>,
+        /// description of the infection
+        #[arg(long)]
+        description: Option<String>,
+        /// health check interval in seconds
+        #[arg(long)]
+        health_interval: Option<u64>,
+        /// agent shared secret (overrides the default path)
+        #[arg(long)]
+        agent_secret: Option<String>,
+        /// path to the agent shared secret
+        #[arg(long)]
+        agent_secret_path: Option<PathBuf>,
+    },
+    /// Detach a previously attached infection (via pandemic-agent)
+    Detach {
+        /// infection name as created by `service attach`
+        name: String,
+        /// agent shared secret (overrides the default path)
+        #[arg(long)]
+        agent_secret: Option<String>,
+        /// path to the agent shared secret
+        #[arg(long)]
+        agent_secret_path: Option<PathBuf>,
+    },
     /// View service logs
     Logs {
         /// Service name
@@ -210,7 +245,7 @@ async fn main() -> Result<()> {
         Commands::Daemon { action } => {
             daemon::handle_daemon_command(&args.socket_path, action).await?
         }
-        Commands::Service { action } => service::handle_service_command(action)?,
+        Commands::Service { action } => service::handle_service_command(action).await?,
         Commands::Bootstrap { action } => bootstrap::handle_bootstrap_command(action)?,
         Commands::Agent { action } => agent::handle_agent_command(action)?,
         Commands::Registry { action } => {

@@ -1355,8 +1355,10 @@ version = "0.4.0"
 dependencies = [
  "anyhow",
  "clap",
+ "hex",
  "pandemic-common",
  "pandemic-protocol",
+ "rand 0.8.5",
  "serde",
  "serde_json",
  "tokio",

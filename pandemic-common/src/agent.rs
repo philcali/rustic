@@ -1,12 +1,15 @@
 use anyhow::Result;
-use pandemic_protocol::{AgentMessage, AgentRequest, Response};
+use pandemic_protocol::{AgentRequest, AuthChallenge, AuthResponse, Response};
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
-const AGENT_SOCKET_PATH: &str = "/var/run/pandemic/admin.sock";
+pub const AGENT_SOCKET_PATH: &str = "/var/run/pandemic/admin.sock";
+/// Default location of the agent shared secret, installed by
+/// `pandemic-cli bootstrap install --with-agent` / `pandemic-cli agent install`.
+pub const AGENT_SECRET_PATH: &str = "/etc/pandemic/agent-secret";
 const CACHE_DURATION: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone)]
@@ -77,7 +80,7 @@ impl AgentClient {
     }
 
     pub fn with_secret_path<P: AsRef<Path>>(mut self, path: P) -> Result<Self> {
-        self.secret = std::fs::read_to_string(path)?;
+        self.secret = std::fs::read_to_string(path)?.trim().to_string();
         Ok(self)
     }
 
@@ -89,12 +92,9 @@ impl AgentClient {
         tokio::io::BufReader::new(&mut stream)
             .read_line(&mut line)
             .await?;
-        let challenge: AgentMessage = serde_json::from_str(line.trim())?;
-
-        let nonce = match challenge {
-            AgentMessage::AuthChallenge(ch) => ch.nonce,
-            _ => return Err(anyhow::anyhow!("Expected AuthChallenge from agent")),
-        };
+        let challenge: AuthChallenge = serde_json::from_str(line.trim())
+            .map_err(|e| anyhow::anyhow!("Expected AuthChallenge from agent: {e}"))?;
+        let nonce = challenge.nonce;
 
         // Compute HMAC-SHA256 signature
         let mut mac: hmac::Hmac<sha2::Sha256> =
@@ -105,8 +105,7 @@ impl AgentClient {
         let signature = hex::encode(mac.finalize().into_bytes());
 
         // Send auth response
-        let response =
-            AgentMessage::AuthResponse(pandemic_protocol::AuthResponse { nonce, signature });
+        let response = AuthResponse { nonce, signature };
         let response_json = serde_json::to_string(&response)?;
         stream.write_all(response_json.as_bytes()).await?;
         stream.write_all(b"\n").await?;
@@ -125,8 +124,7 @@ impl AgentClient {
         let stream = self.connect().await?;
         let mut buf_reader = BufReader::new(stream);
 
-        let message = AgentMessage::Request(request.clone());
-        let request_json = serde_json::to_string(&message)?;
+        let request_json = serde_json::to_string(request)?;
         buf_reader
             .get_mut()
             .write_all(request_json.as_bytes())

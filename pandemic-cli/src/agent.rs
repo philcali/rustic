@@ -1,4 +1,4 @@
-use crate::{system, AgentAction};
+use crate::{secret, system, AgentAction};
 use anyhow::Result;
 use std::path::Path;
 
@@ -33,5 +33,15 @@ WantedBy=multi-user.target
         binary_path.display()
     );
 
-    system::install_service("agent", &service_content)
+    // Mint the shared secret at the default path so the agent and the CLI
+    // agree without extra ceremony. The agent falls back to this path when
+    // --secret / --secret-path are not set.
+    let secret_path = secret::ensure_agent_secret()?;
+
+    system::install_service("agent", &service_content)?;
+    println!(
+        "Agent secret installed at {} (0600, root-only)",
+        secret_path.display()
+    );
+    Ok(())
 }
