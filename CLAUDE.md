@@ -81,6 +81,8 @@ cargo clippy --workspace -- -D warnings
 cargo fmt --check
 ```
 
+For E2E tests that need a real init system (systemd units, `systemctl`, journald) without host access, use the dockerized-systemd template in [`e2e/`](e2e/README.md).
+
 ## CI/CD
 
 Three GitHub Actions workflows:
