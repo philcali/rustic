@@ -15,13 +15,13 @@ All crates share version `0.4.0` and workspace dependencies defined in the root 
 | `pandemic-daemon` | Core daemon — listens on a Unix socket, manages plugin registry, event bus, health metrics |
 | `pandemic-protocol` | Shared types: `Request`, `Response`, `Event`, `PluginInfo`, `HealthMetrics`, `AgentRequest` |
 | `pandemic-common` | Shared client libraries: `DaemonClient` / `PersistentClient` (daemon IPC), `AgentClient` (admin socket IPC), `RegistryClient` (remote infection registry) |
-| `pandemic-cli` | CLI tool: `daemon list/get/health/deregister`, `service install/start/stop/restart`, `bootstrap`, `agent` operations |
-| `pandemic-agent` | Privileged root-only agent handling systemd service management, user/group management, and registry operations |
+| `pandemic-cli` | CLI tool: `daemon list/get/health/deregister`, `service install/start/stop/restart`, `service attach/detach`, `bootstrap`, `agent` operations |
+| `pandemic-agent` | Privileged root-only agent handling systemd service management, user/group management, infection attach/detach (sidecar units), and registry operations |
 | `pandemic-rest` | HTTP REST API server (axum) — exposes daemon operations over HTTP with Bearer token auth |
 | `pandemic-console` | Web dashboard (Vite + vanilla JS) — serves static SPA, registers as a plugin with the daemon |
 | `pandemic-udp` | UDP proxy — exposes the daemon's Unix socket over UDP |
 | `pandemic-iam` | IAM Anywhere integration (AWS Roles Anywhere) — certificate-based auth, credential rotation |
-| `pandemic-proxy` | Service wrapper — launches a config-specified process and registers it with the daemon |
+| `pandemic-proxy` | Service wrapper — either launches a config-specified process or attaches an existing systemd unit (`--attach`) and registers it with the daemon |
 | `examples/hello-infection` | Example infection plugin |
 
 ## Architecture
@@ -35,6 +35,8 @@ The daemon (`pandemic`) is the central process. It:
 5. Collects system health metrics (CPU, memory, uptime, load average)
 
 Plugins communicate with the daemon via `Request`/`Response`/`Event` messages over Unix sockets (line-delimited JSON). The `pandemic-agent` (root-only) handles privileged operations via a separate admin socket at `/var/run/pandemic/admin.sock`.
+
+`service attach <unit>` wraps an existing systemd unit as an infection: the agent writes `/etc/pandemic/infections/<name>.toml` (with `attach = "<unit>"`) plus a sidecar unit `pandemic-<name>.service` that runs `pandemic-proxy --attach <unit>`; detach removes both. Agent auth is HMAC-SHA256 challenge/response; the shared secret resolves in order `--secret` → `--secret-path` → `/etc/pandemic/agent-secret` (0600, minted by `bootstrap install --with-agent` / `agent install`) → random (logged, last resort). Agent wire messages are bare (`AgentRequest`/`AuthResponse` serialized directly, no `AgentMessage` wrapper) to match the daemon pattern.
 
 The event bus supports wildcard topics (`plugin.deregistered*` matches `plugin.deregistered`).
 
@@ -78,6 +80,8 @@ cargo clippy --workspace -- -D warnings
 # Check formatting
 cargo fmt --check
 ```
+
+For E2E tests that need a real init system (systemd units, `systemctl`, journald) without host access, use the dockerized-systemd template in [`e2e/`](e2e/README.md).
 
 ## CI/CD
 

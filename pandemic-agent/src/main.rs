@@ -1,4 +1,5 @@
 mod handlers;
+mod infection;
 mod socket;
 mod systemd;
 mod users;
@@ -6,7 +7,7 @@ mod users;
 use anyhow::Result;
 use clap::Parser;
 use hmac::{Hmac, Mac};
-use pandemic_protocol::{AgentMessage, AuthChallenge, Response};
+use pandemic_protocol::{AgentRequest, AuthChallenge, AuthResponse, Response};
 use sha2::Sha256;
 use std::path::PathBuf;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -66,25 +67,12 @@ async fn main() -> Result<()> {
 
     info!("Agent listening on {:?}", args.socket_path);
 
-    // Resolve shared secret
-    let secret = match (&args.secret, &args.secret_path) {
-        (Some(s), _) => s.clone(),
-        (None, Some(path)) => tokio::fs::read_to_string(path).await?,
-        (None, None) => {
-            let secret = hex::encode(rand::random::<[u8; 32]>());
-            error!(
-                "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
- WARN: No agent secret configured. A random secret was generated.
-       You MUST save this secret and pass it via --secret or --secret-path
-       on subsequent runs, or clients will be unable to authenticate.
-
- agent secret: {}
-!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
-                secret
-            );
-            secret
-        }
-    };
+    // Resolve shared secret: --secret > --secret-path > default path > generate
+    let secret = resolve_secret(
+        args.secret.as_deref(),
+        args.secret_path.as_deref(),
+        pandemic_common::AGENT_SECRET_PATH,
+    )?;
 
     // Accept connections
     loop {
@@ -100,6 +88,46 @@ async fn main() -> Result<()> {
     }
 }
 
+/// Resolve the shared secret.
+///
+/// Precedence: `--secret` inline value > `--secret-path` file > the default
+/// secret path (installed by `pandemic-cli bootstrap install --with-agent`)
+/// > freshly generated (last resort, printed to the log).
+fn resolve_secret(
+    secret: Option<&str>,
+    secret_path: Option<&std::path::Path>,
+    default_secret_path: &str,
+) -> Result<String> {
+    if let Some(secret) = secret {
+        return Ok(secret.to_string());
+    }
+
+    if let Some(path) = secret_path {
+        return Ok(std::fs::read_to_string(path)?.trim().to_string());
+    }
+
+    if let Ok(content) = std::fs::read_to_string(default_secret_path) {
+        let trimmed = content.trim().to_string();
+        if !trimmed.is_empty() {
+            info!("Using agent secret from {}", default_secret_path);
+            return Ok(trimmed);
+        }
+    }
+
+    let secret = hex::encode(rand::random::<[u8; 32]>());
+    error!(
+        "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+ WARN: No agent secret configured. A random secret was generated.
+       You MUST save this secret and pass it via --secret or --secret-path
+       on subsequent runs, or clients will be unable to authenticate.
+
+ agent secret: {}
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
+        secret
+    );
+    Ok(secret)
+}
+
 async fn handle_connection(mut stream: UnixStream, secret: String) -> Result<()> {
     let (reader, mut writer) = stream.split();
     let mut buf_reader = BufReader::new(reader);
@@ -107,9 +135,9 @@ async fn handle_connection(mut stream: UnixStream, secret: String) -> Result<()>
 
     // Send auth challenge
     let nonce = hex::encode(rand::random::<[u8; 16]>());
-    let challenge = AgentMessage::AuthChallenge(AuthChallenge {
+    let challenge = AuthChallenge {
         nonce: nonce.clone(),
-    });
+    };
     let challenge_json = serde_json::to_string(&challenge)?;
     writer.write_all(challenge_json.as_bytes()).await?;
     writer.write_all(b"\n").await?;
@@ -121,10 +149,10 @@ async fn handle_connection(mut stream: UnixStream, secret: String) -> Result<()>
     let trimmed = line.trim().to_string();
     line.clear();
 
-    let auth_response = match serde_json::from_str::<AgentMessage>(&trimmed) {
-        Ok(AgentMessage::AuthResponse(resp)) => resp,
-        _ => {
-            warn!("Authentication failed: expected AuthResponse");
+    let auth_response = match serde_json::from_str::<AuthResponse>(&trimmed) {
+        Ok(resp) => resp,
+        Err(e) => {
+            warn!("Authentication failed: expected AuthResponse ({e})");
             return Ok(());
         }
     };
@@ -160,9 +188,8 @@ async fn handle_connection(mut stream: UnixStream, secret: String) -> Result<()>
             continue;
         }
 
-        let response = match serde_json::from_str::<AgentMessage>(trimmed) {
-            Ok(AgentMessage::Request(request)) => handle_agent_request(request).await,
-            Ok(_) => Response::error("Expected request message"),
+        let response = match serde_json::from_str::<AgentRequest>(trimmed) {
+            Ok(request) => handle_agent_request(request).await,
             Err(e) => {
                 warn!("Failed to parse message: {}", e);
                 Response::error("Invalid message format")
@@ -177,4 +204,60 @@ async fn handle_connection(mut stream: UnixStream, secret: String) -> Result<()>
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_secret;
+
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("pandemic-agent-test-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn inline_secret_wins() {
+        let dir = temp_dir("inline");
+        let path = dir.join("secret");
+        std::fs::write(&path, "file-secret\n").unwrap();
+        let resolved = resolve_secret(
+            Some("inline-secret"),
+            Some(path.as_path()),
+            dir.join("default").to_str().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(resolved, "inline-secret");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn secret_path_is_trimmed() {
+        let dir = temp_dir("path");
+        let path = dir.join("secret");
+        std::fs::write(&path, "file-secret\n").unwrap();
+        let resolved =
+            resolve_secret(None, Some(path.as_path()), "nonexistent-secret-path").unwrap();
+        assert_eq!(resolved, "file-secret");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn default_path_used_when_no_flags() {
+        let dir = temp_dir("default");
+        std::fs::write(dir.join("agent-secret"), "default-secret\n").unwrap();
+        let resolved =
+            resolve_secret(None, None, dir.join("agent-secret").to_str().unwrap()).unwrap();
+        assert_eq!(resolved, "default-secret");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn generates_when_nothing_configured() {
+        let resolved = resolve_secret(None, None, "nonexistent-secret-path").unwrap();
+        assert_eq!(resolved.len(), 64, "expected 32 random bytes hex-encoded");
+        assert!(resolved.chars().all(|c| c.is_ascii_hexdigit()));
+    }
 }

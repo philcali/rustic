@@ -1,5 +1,6 @@
 use anyhow::Result;
 use pandemic_protocol::{Event, Message, Request, Response};
+use std::collections::VecDeque;
 use std::path::Path;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
@@ -10,6 +11,8 @@ pub struct DaemonClient;
 pub struct PersistentClient {
     stream: BufReader<UnixStream>,
     event_rx: Option<mpsc::UnboundedReceiver<Event>>,
+    /// Events the daemon interleaved on the stream while we awaited a response
+    pending_events: VecDeque<Event>,
 }
 
 impl DaemonClient {
@@ -40,6 +43,7 @@ impl DaemonClient {
         Ok(PersistentClient {
             stream: reader,
             event_rx: None,
+            pending_events: VecDeque::new(),
         })
     }
 }
@@ -53,11 +57,25 @@ impl PersistentClient {
             .await?;
         self.stream.get_mut().write_all(b"\n").await?;
 
-        let mut response_line = String::new();
-        self.stream.read_line(&mut response_line).await?;
+        // The daemon may push event lines onto this connection at any time
+        // (e.g. the auto-emitted `plugin.registered` event), interleaved
+        // with our response. Buffer any events and keep reading until the
+        // line that is actually our response arrives.
+        loop {
+            let mut line = String::new();
+            self.stream.read_line(&mut line).await?;
 
-        let response: Response = serde_json::from_str(&response_line)?;
-        Ok(response)
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if let Ok(response) = serde_json::from_str::<Response>(trimmed) {
+                return Ok(response);
+            }
+            if let Ok(Message::Event(event)) = serde_json::from_str::<Message>(trimmed) {
+                self.pending_events.push_back(event);
+            }
+        }
     }
 
     /// Subscribe to event topics
@@ -69,6 +87,11 @@ impl PersistentClient {
 
     /// Read the next event from the stream (blocking)
     pub async fn read_event(&mut self) -> Result<Option<Event>> {
+        // Events captured while awaiting responses are delivered first
+        if let Some(event) = self.pending_events.pop_front() {
+            return Ok(Some(event));
+        }
+
         loop {
             let mut line = String::new();
 
@@ -79,7 +102,7 @@ impl PersistentClient {
                     {
                         return Ok(Some(event));
                     }
-                    // Invalid JSON or not an event, continue loop to read next line
+                    // Not an event (e.g. a stray response line), keep reading
                 }
             }
         }

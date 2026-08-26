@@ -147,6 +147,27 @@ pub enum AgentRequest {
         name: String,
         target_path: Option<String>,
     },
+
+    // Infection attach (register an existing systemd unit via pandemic-proxy)
+    AttachInfection {
+        /// systemd unit to attach, e.g. "mosquitto" or "mosquitto.service"
+        unit: String,
+        /// infection name; defaults to the unit's base name
+        name: Option<String>,
+        /// version recorded in the daemon; defaults to "0.0.0"
+        version: Option<String>,
+        description: Option<String>,
+        /// health check command; defaults to `systemctl is-active <unit>`
+        health_check: Option<Vec<String>>,
+        /// health check interval in seconds; defaults to 30
+        health_interval: Option<u64>,
+        /// path to the pandemic-proxy binary; defaults to /usr/local/bin/pandemic-proxy
+        proxy_path: Option<String>,
+    },
+    DetachInfection {
+        /// infection name as created by AttachInfection
+        name: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -183,15 +204,6 @@ pub struct AuthChallenge {
 pub struct AuthResponse {
     pub nonce: String,
     pub signature: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(tag = "type")]
-pub enum AgentMessage {
-    Request(AgentRequest),
-    Response(Response),
-    AuthChallenge(AuthChallenge),
-    AuthResponse(AuthResponse),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -387,6 +399,77 @@ mod tests {
         match deserialized {
             Response::NotFound { message } => assert_eq!(message, "Plugin not found"),
             _ => panic!("Expected NotFound response"),
+        }
+    }
+
+    #[test]
+    fn test_attach_infection_request_roundtrip() {
+        let request = AgentRequest::AttachInfection {
+            unit: "mosquitto".to_string(),
+            name: Some("mosq".to_string()),
+            version: Some("2.0.18".to_string()),
+            description: Some("MQTT broker".to_string()),
+            health_check: Some(vec!["systemctl".to_string(), "is-active".to_string()]),
+            health_interval: Some(15),
+            proxy_path: None,
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains(r#""type":"AttachInfection""#));
+        assert!(json.contains(r#""unit":"mosquitto""#));
+
+        let deserialized: AgentRequest = serde_json::from_str(&json).unwrap();
+        match deserialized {
+            AgentRequest::AttachInfection {
+                unit,
+                name,
+                version,
+                health_interval,
+                ..
+            } => {
+                assert_eq!(unit, "mosquitto");
+                assert_eq!(name.as_deref(), Some("mosq"));
+                assert_eq!(version.as_deref(), Some("2.0.18"));
+                assert_eq!(health_interval, Some(15));
+            }
+            _ => panic!("Expected AttachInfection request"),
+        }
+    }
+
+    #[test]
+    fn test_agent_auth_messages_wire_format() {
+        // The agent protocol sends bare messages (like the daemon protocol).
+        // Auth messages are plain structs exchanged at fixed points of the
+        // handshake; requests are `type`-tagged.
+        let challenge = AuthChallenge {
+            nonce: "abc123".to_string(),
+        };
+        let json = serde_json::to_string(&challenge).unwrap();
+        assert_eq!(json, r#"{"nonce":"abc123"}"#);
+        let back: AuthChallenge = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.nonce, "abc123");
+
+        let response = AuthResponse {
+            nonce: "abc123".to_string(),
+            signature: "deadbeef".to_string(),
+        };
+        let json = serde_json::to_string(&response).unwrap();
+        assert_eq!(json, r#"{"nonce":"abc123","signature":"deadbeef"}"#);
+        let back: AuthResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.signature, "deadbeef");
+    }
+
+    #[test]
+    fn test_detach_infection_request_roundtrip() {
+        let request = AgentRequest::DetachInfection {
+            name: "mosquitto".to_string(),
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains(r#""type":"DetachInfection""#));
+
+        let deserialized: AgentRequest = serde_json::from_str(&json).unwrap();
+        match deserialized {
+            AgentRequest::DetachInfection { name } => assert_eq!(name, "mosquitto"),
+            _ => panic!("Expected DetachInfection request"),
         }
     }
 

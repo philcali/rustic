@@ -64,6 +64,13 @@ docker run -p 3000:3000 -v /tmp/pandemic:/var/run/pandemic pandemic /usr/local/b
 docker run -v /tmp/pandemic:/var/run/pandemic pandemic /usr/local/bin/hello-infection
 ```
 
+## E2E Testing with Dockerized Systemd
+
+For end-to-end tests that need a real init system (systemd units, `systemctl`,
+journald) without host access or KVM, there is a systemd-in-docker template:
+see [`e2e/README.md`](e2e/README.md) for launch instructions and a full
+attach/detach walkthrough.
+
 ## CLI Management
 
 ```bash

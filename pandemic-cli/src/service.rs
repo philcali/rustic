@@ -1,10 +1,12 @@
 use anyhow::Result;
-use std::path::Path;
+use pandemic_common::{AgentClient, AGENT_SECRET_PATH};
+use pandemic_protocol::{AgentRequest, Response};
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::{system, ServiceAction};
 
-pub fn handle_service_command(action: ServiceAction) -> Result<()> {
+pub async fn handle_service_command(action: ServiceAction) -> Result<()> {
     match action {
         ServiceAction::Install { name, binary_path } => install_service(&name, &binary_path),
         ServiceAction::Uninstall { name } => system::uninstall_service(&name),
@@ -12,6 +14,31 @@ pub fn handle_service_command(action: ServiceAction) -> Result<()> {
         ServiceAction::Stop { name } => system::stop_service(&name),
         ServiceAction::Restart { name } => system::restart_service(&name),
         ServiceAction::Status { name } => system::status_service(&name),
+        ServiceAction::Attach {
+            unit,
+            name,
+            version,
+            description,
+            health_interval,
+            agent_secret,
+            agent_secret_path,
+        } => {
+            attach_infection(
+                &unit,
+                name,
+                version,
+                description,
+                health_interval,
+                agent_secret,
+                agent_secret_path,
+            )
+            .await
+        }
+        ServiceAction::Detach {
+            name,
+            agent_secret,
+            agent_secret_path,
+        } => detach_infection(&name, agent_secret, agent_secret_path).await,
         ServiceAction::Logs {
             name,
             follow,
@@ -48,6 +75,90 @@ WantedBy=multi-user.target
         binary_path.display()
     );
     system::install_service(name, &service_content)
+}
+
+/// Build an authenticated agent client: `--agent-secret` > `--agent-secret-path`
+/// > the default path installed by `bootstrap install --with-agent`.
+fn agent_client(secret: Option<String>, secret_path: Option<PathBuf>) -> Result<AgentClient> {
+    if let Some(secret) = secret {
+        return Ok(AgentClient::new().with_secret(secret));
+    }
+    if let Some(path) = secret_path {
+        return AgentClient::new().with_secret_path(path);
+    }
+    if Path::new(AGENT_SECRET_PATH).exists() {
+        return AgentClient::new().with_secret_path(AGENT_SECRET_PATH);
+    }
+    Err(anyhow::anyhow!(
+        "no agent secret found at {AGENT_SECRET_PATH}; run `pandemic-cli bootstrap install --with-agent` (or `pandemic-cli agent install`) first, or pass --agent-secret / --agent-secret-path"
+    ))
+}
+
+async fn agent_action(
+    request: &AgentRequest,
+    secret: Option<String>,
+    secret_path: Option<PathBuf>,
+) -> Result<serde_json::Value> {
+    let client = agent_client(secret, secret_path)?;
+    let response = client.send_agent_request(request).await?;
+    match response {
+        Response::Success { data } => Ok(data.unwrap_or_else(|| serde_json::json!({}))),
+        Response::Error { message } => Err(anyhow::anyhow!("{message}")),
+        Response::NotFound { message } => Err(anyhow::anyhow!("{message}")),
+    }
+}
+
+async fn attach_infection(
+    unit: &str,
+    name: Option<String>,
+    version: Option<String>,
+    description: Option<String>,
+    health_interval: Option<u64>,
+    agent_secret: Option<String>,
+    agent_secret_path: Option<PathBuf>,
+) -> Result<()> {
+    let request = AgentRequest::AttachInfection {
+        unit: unit.to_string(),
+        name,
+        version,
+        description,
+        health_check: None,
+        health_interval,
+        proxy_path: None,
+    };
+    let data = agent_action(&request, agent_secret, agent_secret_path).await?;
+
+    if let Some(name) = data.get("name").and_then(|v| v.as_str()) {
+        println!("✅ Attached {unit} as infection '{name}'");
+    }
+    if let Some(service) = data.get("service").and_then(|v| v.as_str()) {
+        println!("   Service:  {service}");
+    }
+    if let Some(config) = data.get("config_path").and_then(|v| v.as_str()) {
+        println!("   Config:   {config}");
+    }
+    if let Some(target) = data.get("unit").and_then(|v| v.as_str()) {
+        println!("   Attaches: {target}.service");
+    }
+    Ok(())
+}
+
+async fn detach_infection(
+    name: &str,
+    agent_secret: Option<String>,
+    agent_secret_path: Option<PathBuf>,
+) -> Result<()> {
+    let request = AgentRequest::DetachInfection {
+        name: name.to_string(),
+    };
+    let data = agent_action(&request, agent_secret, agent_secret_path).await?;
+    println!("✅ Detached infection '{name}'");
+    if let Some(removed) = data.get("removed_unit").and_then(|v| v.as_bool()) {
+        if !removed {
+            println!("   Note: service unit was not present (already removed?)");
+        }
+    }
+    Ok(())
 }
 
 fn logs_service(name: &str, follow: bool, lines: u32) -> Result<()> {
