@@ -22,6 +22,7 @@ All crates share version `0.4.0` and workspace dependencies defined in the root 
 | `pandemic-udp` | UDP proxy — exposes the daemon's Unix socket over UDP |
 | `pandemic-iam` | IAM Anywhere integration (AWS Roles Anywhere) — certificate-based auth, credential rotation |
 | `pandemic-proxy` | Service wrapper — either launches a config-specified process or attaches an existing systemd unit (`--attach`) and registers it with the daemon |
+| `pandemic-mqtt` | One-way MQTT bridge — subscribes to the daemon's event bus and republishes every event to an MQTT broker (retained status/health/plugins snapshots on (re)connect, LWT offline marker) |
 | `examples/hello-infection` | Example infection plugin |
 
 ## Architecture
@@ -60,6 +61,9 @@ cargo run -p pandemic-console
 
 # Run the UDP proxy
 cargo run -p pandemic-udp
+
+# Run the MQTT bridge (needs a broker, e.g. mosquitto)
+cargo run -p pandemic-mqtt -- --broker-url mqtt://127.0.0.1:1883 --topic-prefix pandemic
 
 # Run the example infection
 cargo run -p hello-infection
