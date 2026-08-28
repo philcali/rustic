@@ -10,7 +10,8 @@ members = [
     "pandemic-console",
     "pandemic-iam",
     "pandemic-proxy",
-    "pandemic-agent"
+    "pandemic-agent",
+    "pandemic-mqtt"
 ]
 resolver = "2"
 

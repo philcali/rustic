@@ -82,6 +82,7 @@ jobs:
               pandemic-proxy \
               pandemic-rest \
               pandemic-udp \
+              pandemic-mqtt \
               hello-infection 2>/dev/null || true
           fi
         done

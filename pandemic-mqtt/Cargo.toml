@@ -1,0 +1,25 @@
+[package]
+name = "pandemic-mqtt"
+version = "0.4.0"
+edition = "2021"
+
+[[bin]]
+name = "pandemic-mqtt"
+path = "src/main.rs"
+
+[dependencies]
+pandemic-protocol = { path = "../pandemic-protocol" }
+pandemic-common = { path = "../pandemic-common" }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+rumqttc = "0.25"
+url = "2"
+
+[dev-dependencies]
+pandemic-daemon = { path = "../pandemic-daemon" }
+socket2 = "0.6"
