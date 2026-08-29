@@ -134,16 +134,13 @@ vars = { socket_path = "{{socket_path}}", port = "{{rest_port}}" }
 name = "console"
 source = "./infections/console.toml"
 order = 3
-vars = { socket_path = "{{socket_path}}", port = "{{console_port}}",
-        api_url = "http://{{host}}:{{rest_port}}" }
+vars = { socket_path = "{{socket_path}}", port = "{{console_port}}", api_url = "http://{{host}}:{{rest_port}}" }
 
 [[infections]]
 name = "mqtt"
 source = "./infections/mqtt.toml"
 order = 4
-vars = { socket_path = "{{socket_path}}",
-        broker_url = "mqtt://{{host}}:{{mqtt_port}}",
-        topic_prefix = "{{topic_prefix}}" }
+vars = { socket_path = "{{socket_path}}", broker_url = "mqtt://{{host}}:{{mqtt_port}}", topic_prefix = "{{topic_prefix}}" }
 ```
 
 Rules:

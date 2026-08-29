@@ -1562,10 +1562,12 @@ dependencies = [
 name = "pandemic-protocol"
 version = "0.4.0"
 dependencies = [
+ "anyhow",
  "chrono",
  "serde",
  "serde_json",
  "sysinfo",
+ "toml",
 ]
 
 [[package]]

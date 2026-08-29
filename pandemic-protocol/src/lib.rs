@@ -31,6 +31,11 @@ mod time_format {
     }
 }
 
+/// Spec-driven install: infection and deployment specs (see
+/// `ideas/deployments.md`). Pure logic — parsing, validation, variable
+/// resolution, and `{{name}}` rendering.
+pub mod spec;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HealthMetrics {
     // Daemon metrics
