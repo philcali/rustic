@@ -1,5 +1,7 @@
+mod files;
 mod handlers;
 mod infection;
+mod packages;
 mod socket;
 mod systemd;
 mod users;

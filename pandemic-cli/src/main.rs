@@ -139,6 +139,17 @@ enum AgentAction {
     Restart,
     /// Show pandemic agent service status
     Status,
+    /// Send a raw AgentRequest as JSON (dev/e2e aid, e.g. `{"type":"GetCapabilities"}`)
+    Request {
+        /// AgentRequest JSON, tagged with "type"
+        json: String,
+        /// agent shared secret (overrides the default path)
+        #[arg(long)]
+        agent_secret: Option<String>,
+        /// path to the agent shared secret
+        #[arg(long)]
+        agent_secret_path: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -247,7 +258,7 @@ async fn main() -> Result<()> {
         }
         Commands::Service { action } => service::handle_service_command(action).await?,
         Commands::Bootstrap { action } => bootstrap::handle_bootstrap_command(action)?,
-        Commands::Agent { action } => agent::handle_agent_command(action)?,
+        Commands::Agent { action } => agent::handle_agent_command(action).await?,
         Commands::Registry { action } => {
             registry::handle_registry_command(&args.socket_path, action).await?
         }

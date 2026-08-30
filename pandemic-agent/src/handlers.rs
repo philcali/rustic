@@ -43,7 +43,8 @@ pub async fn handle_agent_request(request: AgentRequest) -> Response {
         AgentRequest::GetCapabilities => {
             info!("Capabilities requested");
             Response::success_with_data(serde_json::json!({
-                "capabilities": ["systemd", "service_management", "user_management", "group_management", "service_config", "infection_registry"]
+                "capabilities": ["systemd", "service_management", "user_management", "group_management", "service_config", "infection_registry", "package_management", "file_management"],
+                "package_managers": crate::packages::detect_package_managers()
             }))
         }
 
@@ -246,6 +247,30 @@ pub async fn handle_agent_request(request: AgentRequest) -> Response {
             match remove_user_from_group(&username, &groupname).await {
                 Ok(_) => Response::success(),
                 Err(e) => Response::error(format!("Failed to remove user from group: {}", e)),
+            }
+        }
+
+        AgentRequest::PackageInstall { manager, packages } => {
+            info!("Installing packages via {manager}: {}", packages.join(", "));
+            match crate::packages::install_packages(&manager, &packages).await {
+                Ok(()) => Response::success(),
+                Err(e) => Response::error(format!("Package install failed: {e}")),
+            }
+        }
+
+        AgentRequest::WriteFile {
+            path,
+            content,
+            owner,
+            mode,
+        } => {
+            info!(
+                "Writing file {path} (owner {owner}, mode {mode}, {} bytes)",
+                content.len()
+            );
+            match crate::files::write_file(&path, &content, &owner, &mode).await {
+                Ok(()) => Response::success(),
+                Err(e) => Response::error(format!("WriteFile failed: {e}")),
             }
         }
     }

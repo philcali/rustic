@@ -94,7 +94,7 @@ fn agent_client(secret: Option<String>, secret_path: Option<PathBuf>) -> Result<
     ))
 }
 
-async fn agent_action(
+pub async fn agent_action(
     request: &AgentRequest,
     secret: Option<String>,
     secret_path: Option<PathBuf>,

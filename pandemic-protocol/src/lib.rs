@@ -173,6 +173,24 @@ pub enum AgentRequest {
         /// infection name as created by AttachInfection
         name: String,
     },
+
+    // Spec-driven install primitives (ideas/deployments.md, phase 2)
+    PackageInstall {
+        /// package manager: one of `apt`, `dnf`, `pacman`, `apk`, `zypper`
+        manager: String,
+        /// package names to install
+        packages: Vec<String>,
+    },
+    WriteFile {
+        /// absolute host path (allowlisted; pandemic internals protected)
+        path: String,
+        /// file content
+        content: String,
+        /// owning user
+        owner: String,
+        /// file mode, e.g. "0600"
+        mode: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

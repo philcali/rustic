@@ -106,6 +106,42 @@ docker exec pandemic-e2e sh -c '
 Expected: `active` / `active` / `0`, and after detach
 `inactive` / `active` / `0`.
 
+## Example: spec primitives (phase 2)
+
+`pandemic-cli agent request <json>` sends a raw `AgentRequest` over the
+authenticated socket — a dev/e2e aid for exercising agent primitives
+before the phase 3/4 CLI surface lands. Prereq: the bootstrap section
+above (secret minted, `pandemic-agent` started).
+
+```bash
+# Capabilities now report which package managers the host supports
+docker exec -u root pandemic-e2e pandemic-cli agent request '{"type":"GetCapabilities"}'
+#   → "package_managers": ["apt"] on the ubuntu base image
+
+# PackageInstall: root installs a package the way a spec would
+docker exec -u root pandemic-e2e pandemic-cli agent request \
+  '{"type":"PackageInstall","manager":"apt","packages":["mosquitto"]}'
+docker exec pandemic-e2e dpkg -s mosquitto | head -2
+docker exec pandemic-e2e command -v mosquitto
+
+# WriteFile: rendered config with owner + mode, as infection specs demand
+docker exec -u root pandemic-e2e pandemic-cli agent request \
+  '{"type":"WriteFile","path":"/etc/pandemic/rest-auth.toml","content":"token = \"demo\"\n","owner":"root","mode":"0600"}'
+docker exec pandemic-e2e stat -c '%U %a %n' /etc/pandemic/rest-auth.toml
+#   → root 600 /etc/pandemic/rest-auth.toml
+
+# Rejection paths — each must exit non-zero with a clear message:
+#   outside the allowlist, protected pandemic internals, unknown manager
+for req in \
+  '{"type":"WriteFile","path":"/tmp/evil","content":"x","owner":"root","mode":"0644"}' \
+  '{"type":"WriteFile","path":"/etc/pandemic/agent-secret","content":"x","owner":"root","mode":"0600"}' \
+  '{"type":"WriteFile","path":"/usr/local/bin/pandemic-agent","content":"x","owner":"root","mode":"0755"}' \
+  '{"type":"WriteFile","path":"/etc/pandemic/blocklist.toml","content":"x","owner":"root","mode":"0600"}' \
+  '{"type":"PackageInstall","manager":"yum","packages":["x"]}' ; do
+  docker exec -u root pandemic-e2e pandemic-cli agent request "$req" || echo "  ^ rejected as expected"
+done
+```
+
 ## Debugging
 
 ```bash
