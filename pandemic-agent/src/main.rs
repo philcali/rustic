@@ -3,6 +3,7 @@ mod handlers;
 mod infection;
 mod packages;
 mod socket;
+mod state;
 mod systemd;
 mod users;
 

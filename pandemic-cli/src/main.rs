@@ -1,6 +1,7 @@
 mod agent;
 mod bootstrap;
 mod daemon;
+mod infection;
 mod registry;
 mod secret;
 mod service;
@@ -47,6 +48,39 @@ enum Commands {
     Registry {
         #[command(subcommand)]
         action: RegistryAction,
+    },
+    /// Spec-driven infection lifecycle (install / status / uninstall)
+    Infection {
+        /// agent shared secret (overrides the default path)
+        #[arg(long)]
+        agent_secret: Option<String>,
+        /// path to the agent shared secret
+        #[arg(long)]
+        agent_secret_path: Option<PathBuf>,
+        #[command(subcommand)]
+        action: InfectionAction,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum InfectionAction {
+    /// Install an infection from a spec file
+    Install {
+        /// Path to the infection spec (spec.toml)
+        path: PathBuf,
+        /// Variable values: --set key=value (repeatable)
+        #[arg(long = "set")]
+        set: Vec<String>,
+    },
+    /// List installed infections, or show one in detail
+    Status {
+        /// Infection name (omit to list all)
+        name: Option<String>,
+    },
+    /// Uninstall an infection (reverse of `infection install`)
+    Uninstall {
+        /// Infection name
+        name: String,
     },
 }
 
@@ -262,6 +296,11 @@ async fn main() -> Result<()> {
         Commands::Registry { action } => {
             registry::handle_registry_command(&args.socket_path, action).await?
         }
+        Commands::Infection {
+            agent_secret,
+            agent_secret_path,
+            action,
+        } => infection::handle_infection_command(action, agent_secret, agent_secret_path).await?,
     }
 
     Ok(())

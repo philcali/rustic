@@ -15,7 +15,7 @@ All crates share version `0.4.0` and workspace dependencies defined in the root 
 | `pandemic-daemon` | Core daemon — listens on a Unix socket, manages plugin registry, event bus, health metrics |
 | `pandemic-protocol` | Shared types: `Request`, `Response`, `Event`, `PluginInfo`, `HealthMetrics`, `AgentRequest` |
 | `pandemic-common` | Shared client libraries: `DaemonClient` / `PersistentClient` (daemon IPC), `AgentClient` (admin socket IPC), `RegistryClient` (remote infection registry) |
-| `pandemic-cli` | CLI tool: `daemon list/get/health/deregister`, `service install/start/stop/restart`, `service attach/detach`, `bootstrap`, `agent` operations |
+| `pandemic-cli` | CLI tool: `daemon list/get/health/deregister`, `service install/start/stop/restart`, `service attach/detach`, `infection install/status/uninstall` (spec-driven lifecycle), `bootstrap`, `agent` operations |
 | `pandemic-agent` | Privileged root-only agent handling systemd service management, user/group management, infection attach/detach (sidecar units), and registry operations |
 | `pandemic-rest` | HTTP REST API server (axum) — exposes daemon operations over HTTP with Bearer token auth |
 | `pandemic-console` | Web dashboard (Vite + vanilla JS) — serves static SPA, registers as a plugin with the daemon |
@@ -38,6 +38,8 @@ The daemon (`pandemic`) is the central process. It:
 Plugins communicate with the daemon via `Request`/`Response`/`Event` messages over Unix sockets (line-delimited JSON). The `pandemic-agent` (root-only) handles privileged operations via a separate admin socket at `/var/run/pandemic/admin.sock`.
 
 `service attach <unit>` wraps an existing systemd unit as an infection: the agent writes `/etc/pandemic/infections/<name>.toml` (with `attach = "<unit>"`) plus a sidecar unit `pandemic-<name>.service` that runs `pandemic-proxy --attach <unit>`; detach removes both. Agent auth is HMAC-SHA256 challenge/response; the shared secret resolves in order `--secret` → `--secret-path` → `/etc/pandemic/agent-secret` (0600, minted by `bootstrap install --with-agent` / `agent install`) → random (logged, last resort). Agent wire messages are bare (`AgentRequest`/`AuthResponse` serialized directly, no `AgentMessage` wrapper) to match the daemon pattern.
+
+`infection install <spec> [--set k=v ...]` is the spec-driven lifecycle: the CLI resolves variables (`--set` > defaults), validates, and renders **all** templates before touching the host, then applies via sequenced agent primitives (packages → groups → users → files → unit/attach), health-checks, and records state at `/etc/pandemic/infections/<name>/state.toml` (dir 0700, file 0600: resolved spec, variable values, file list with sha256, unit name, install timestamp). `infection status [name]` and `infection uninstall <name>` cover both recorded infections and the legacy `service attach` bridge. On failure the CLI reports the failing step plus the steps already applied (re-running is safe — completed steps are idempotent).
 
 The event bus supports wildcard topics (`plugin.deregistered*` matches `plugin.deregistered`).
 
@@ -112,7 +114,7 @@ Messages are line-delimited JSON. The daemon uses `serde_json` with `#[serde(tag
 
 **Request types**: `Register`, `Deregister`, `ListPlugins`, `GetPlugin`, `Subscribe`, `Unsubscribe`, `Publish`, `GetHealth`
 
-**AgentRequest types**: `GetHealth`, `GetCapabilities`, `ListServices`, `SystemdControl`, `UserCreate/Delete/Modify`, `GroupCreate/Delete/AddUser/RemoveUser`, `ServiceConfigOverride/Reset`, `SearchInfections`, `GetInfectionManifest`, `InstallInfection`
+**AgentRequest types**: `GetHealth`, `GetCapabilities`, `ListServices`, `SystemdControl` (start/stop/restart/enable/disable/status/daemon-reload), `UserCreate/Delete/Modify`, `ListUsers`, `GroupCreate/Delete/AddUser/RemoveUser`, `ListGroups`, `ServiceConfigOverride/Reset`, `GetServiceConfig`, `SearchInfections`, `GetInfectionManifest`, `InstallInfection`, `AttachInfection`/`DetachInfection`, `PackageInstall`, `WriteFile`, `RecordInfection`, `ListInfections`, `GetInfectionStatus`, `UninstallInfection`
 
 **Response types**: `Success { data }`, `Error { message }`, `NotFound { message }`
 

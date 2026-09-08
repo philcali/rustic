@@ -35,6 +35,7 @@
 mod deployment;
 mod infection;
 mod render;
+mod state;
 
 pub use deployment::{parse_deployment_spec, DeploymentInfection, DeploymentMeta, DeploymentSpec};
 pub use infection::{
@@ -45,6 +46,7 @@ pub use render::{
     canonical_unit_name, check_infection_collisions, render_template, resolve_deployment_variables,
     resolve_infection, validate_deployment, RenderedFile, RenderedInfection, RenderedUnit,
 };
+pub use state::{InfectionRecordedFile, InfectionState};
 
 use anyhow::{bail, Result};
 

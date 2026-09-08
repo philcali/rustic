@@ -20,6 +20,15 @@ pub async fn execute_systemctl(action: &str, service: &str) -> Result<String> {
     }
 }
 
+/// Ask systemd to re-read its unit files.
+pub async fn daemon_reload() -> Result<()> {
+    let status = Command::new("systemctl").arg("daemon-reload").status()?;
+    if !status.success() {
+        return Err(anyhow::anyhow!("systemctl daemon-reload failed"));
+    }
+    Ok(())
+}
+
 pub async fn list_pandemic_services() -> Result<Vec<serde_json::Value>> {
     let output = Command::new("systemctl")
         .arg("--legend=false")
@@ -65,10 +74,7 @@ pub async fn delete_service_override(service: &str) -> anyhow::Result<()> {
     }
 
     // Reload systemd
-    let status = Command::new("systemctl").arg("daemon-reload").status()?;
-    if !status.success() {
-        return Err(anyhow::anyhow!("systemctl daemon-reload failed"));
-    }
+    daemon_reload().await?;
 
     Ok(())
 }
@@ -143,10 +149,7 @@ pub async fn set_service_override(
     std::fs::write(&override_file, content)?;
 
     // Reload systemd
-    let status = Command::new("systemctl").arg("daemon-reload").status()?;
-    if !status.success() {
-        return Err(anyhow::anyhow!("systemctl daemon-reload failed"));
-    }
+    daemon_reload().await?;
 
     Ok(())
 }

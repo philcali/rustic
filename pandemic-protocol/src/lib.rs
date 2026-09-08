@@ -36,6 +36,8 @@ mod time_format {
 /// resolution, and `{{name}}` rendering.
 pub mod spec;
 
+use spec::InfectionState;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HealthMetrics {
     // Daemon metrics
@@ -190,6 +192,27 @@ pub enum AgentRequest {
         owner: String,
         /// file mode, e.g. "0600"
         mode: String,
+    },
+
+    // Spec-driven infection lifecycle (ideas/deployments.md, phase 3)
+    /// Record the state of an installed infection (0600 root-only)
+    RecordInfection {
+        /// infection name
+        name: String,
+        /// the recorded state (variables, files + hashes, unit/attach, health)
+        state: InfectionState,
+    },
+    /// List installed infections (spec-driven state + legacy attach records)
+    ListInfections,
+    /// Status of one infection: recorded state + live unit/file checks
+    GetInfectionStatus {
+        /// infection name
+        name: String,
+    },
+    /// Uninstall an infection (reverse of install, driven by recorded state)
+    UninstallInfection {
+        /// infection name
+        name: String,
     },
 }
 
@@ -493,6 +516,72 @@ mod tests {
         match deserialized {
             AgentRequest::DetachInfection { name } => assert_eq!(name, "mosquitto"),
             _ => panic!("Expected DetachInfection request"),
+        }
+    }
+
+    #[test]
+    fn test_infection_lifecycle_request_roundtrips() {
+        use spec::{InfectionRecordedFile, InfectionState};
+
+        let state = InfectionState {
+            name: "rest".to_string(),
+            version: "0.4.0".to_string(),
+            description: "Pandemic REST API".to_string(),
+            variables: {
+                let mut m = std::collections::BTreeMap::new();
+                m.insert("port".to_string(), "8080".to_string());
+                m
+            },
+            groups: vec!["rest".to_string()],
+            users: vec!["rest".to_string()],
+            files: vec![InfectionRecordedFile {
+                target: "/etc/pandemic/rest-auth.toml".to_string(),
+                sha256: "abc123".to_string(),
+                owner: "root".to_string(),
+                mode: "0600".to_string(),
+            }],
+            unit: Some("rest".to_string()),
+            attach: None,
+            health_check: vec!["curl".to_string(), "-sf".to_string()],
+            health_interval: 15,
+            installed_at: None,
+            owner: None,
+        };
+
+        let request = AgentRequest::RecordInfection {
+            name: "rest".to_string(),
+            state: state.clone(),
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains(r#""type":"RecordInfection""#));
+        let back: AgentRequest = serde_json::from_str(&json).unwrap();
+        match back {
+            AgentRequest::RecordInfection { name, state } => {
+                assert_eq!(name, "rest");
+                assert_eq!(state, state);
+            }
+            other => panic!("Expected RecordInfection, got {other:?}"),
+        }
+
+        for (req, tag) in [
+            (AgentRequest::ListInfections, r#""type":"ListInfections""#),
+            (
+                AgentRequest::GetInfectionStatus {
+                    name: "rest".to_string(),
+                },
+                r#""type":"GetInfectionStatus""#,
+            ),
+            (
+                AgentRequest::UninstallInfection {
+                    name: "rest".to_string(),
+                },
+                r#""type":"UninstallInfection""#,
+            ),
+        ] {
+            let json = serde_json::to_string(&req).unwrap();
+            assert!(json.contains(tag), "missing {tag} in {json}");
+            let back: AgentRequest = serde_json::from_str(&json).unwrap();
+            assert_eq!(serde_json::to_string(&back).unwrap(), json);
         }
     }
 

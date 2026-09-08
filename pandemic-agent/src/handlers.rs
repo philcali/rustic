@@ -111,6 +111,9 @@ pub async fn handle_agent_request(request: AgentRequest) -> Response {
             info!("Systemd control: {} {}", action, service);
 
             let result = match action.as_str() {
+                "daemon-reload" => crate::systemd::daemon_reload()
+                    .await
+                    .map(|()| String::new()),
                 "start" | "stop" | "restart" | "enable" | "disable" | "status" => {
                     execute_systemctl(&action, &service).await
                 }
@@ -271,6 +274,46 @@ pub async fn handle_agent_request(request: AgentRequest) -> Response {
             match crate::files::write_file(&path, &content, &owner, &mode).await {
                 Ok(()) => Response::success(),
                 Err(e) => Response::error(format!("WriteFile failed: {e}")),
+            }
+        }
+
+        AgentRequest::RecordInfection { name, state } => {
+            info!("Recording infection: {name} (version {})", state.version);
+            match crate::state::record_infection(&name, &state) {
+                Ok(()) => Response::success_with_data(serde_json::json!({ "name": name })),
+                Err(e) => Response::error(format!("Failed to record infection: {e}")),
+            }
+        }
+
+        AgentRequest::ListInfections => {
+            info!("Listing infections");
+            match crate::state::list_infections() {
+                Ok(infections) => Response::success_with_data(serde_json::json!({
+                    "infections": infections
+                })),
+                Err(e) => Response::error(format!("Failed to list infections: {e}")),
+            }
+        }
+
+        AgentRequest::GetInfectionStatus { name } => {
+            info!("Infection status: {name}");
+            if !crate::state::is_installed(&name) {
+                return Response::not_found(format!("infection '{name}' is not installed"));
+            }
+            match crate::state::infection_status(&name).await {
+                Ok(status) => Response::success_with_data(status),
+                Err(e) => Response::error(format!("Failed to read infection status: {e}")),
+            }
+        }
+
+        AgentRequest::UninstallInfection { name } => {
+            info!("Uninstalling infection: {name}");
+            if !crate::state::is_installed(&name) {
+                return Response::not_found(format!("infection '{name}' is not installed"));
+            }
+            match crate::state::uninstall_infection(&name).await {
+                Ok(result) => Response::success_with_data(result),
+                Err(e) => Response::error(format!("Failed to uninstall infection: {e}")),
             }
         }
     }
