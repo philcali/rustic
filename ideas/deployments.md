@@ -30,7 +30,7 @@ pandemic-cli infection install ./mosquitto.toml --set port=1883
 
 1. **Infections don't know about each other.** An infection declares the variables it needs; it never references another service's port, URL, or name.
 2. **Wiring lives in the deployment.** Cross-infection references (`api_url = "http://{{host}}:{{rest_port}}"`) exist only at the deployment level. This is what keeps infections reusable across deployments.
-3. **The agent is a dumb executor.** The CLI resolves, renders, and validates; the agent executes individual privileged steps via `AgentRequest`s. A deployment never crosses the wire to the agent.
+3. **The agent owns apply; the boundary is a verb, not a process.** Each install splits into `Plan*` (pure — resolve, render, validate, return a concrete plan; no privileged ops) and `Apply*` (privileged — execute the concrete plan and record state). Removal, state, and status already live in the agent; install is consolidated there too. CLI, REST, and the console are thin passthroughs — they express intent, they don't re-implement the loop. Nothing privileged happens until `Apply*`.
 4. **A deployment owns what it installs.** Ownership is recorded so `deploy remove` is precise and standalone infections are left alone.
 5. **Not Ansible.** A small fixed schema: packages, files, users/groups, unit-or-attach, health. No arbitrary command execution in v1.
 
@@ -152,20 +152,16 @@ Rules:
 
 ## Execution Model
 
-`deploy install` = resolve → validate → render → N × apply:
+The boundary is a **protocol split**, not "the client does the work":
 
-1. Resolve each `source` (local path or registry).
-2. Validate: names, variable coverage, unit/attach exclusivity, target-path collisions across infections.
-3. Render every template with resolved variables. Nothing is written yet.
-4. For each infection, in `order`, via the agent (root):
-   - `PackageInstall { manager, packages }` — **new** variant
-   - `GroupCreate` / `UserCreate` — existing
-   - `WriteFile { path, content, owner, mode }` — **new** variant (generalizes what the agent already does when writing unit files)
-   - unit install / `AttachInfection` — existing flows
-   - `SystemdControl { enable, start }` — existing
-5. Health-check per infection. On failure, report the failing infection and the steps already taken.
+- **The client** (CLI / REST / console) resolves each `source` (local path or registry fetch) and binds CLI `--set` / deployment `[variables]`. Registry resolution stays client-side for now (see Security), so the agent never does a network fetch.
+- **`Plan*`** — pure, non-privileged, no network. Renders every template with resolved variables, validates (names, variable coverage, unit/attach exclusivity, target-path collisions across infections), and returns a **concrete plan**: packages, files with rendered content + placement, user/group/unit actions, in `order`. Nothing is written. This is the `--dry-run` artifact.
+- **`Apply*`** — privileged (agent, root). For each infection, in `order`, via the existing primitives: `PackageInstall { manager, packages }`, `GroupCreate` / `UserCreate`, `WriteFile { path, content, owner, mode }`, unit install / `AttachInfection`, `SystemdControl { enable, start }`. Health-checks per infection; on failure, reports the failing infection and the steps already taken. Idempotent — safe to re-run (re-apply/upgrade).
+- **Removal / state / status** — already agent-owned: `RemoveDeployment` (reverse-order uninstall of owned infections), `RecordInfection` / `RecordDeployment`, and the `*Status` handlers.
 
-New protocol surface: `InfectionSpec` / `DeploymentSpec` types in `pandemic-protocol` (shared by CLI, agent, and later epidemic), plus the two new `AgentRequest` variants. The agent never sees a deployment.
+CLI, REST, and the console are **thin passthroughs**: build the resolved spec, call `Plan*` (optionally show it), call `Apply*`. No client re-implements the apply loop, so there is nothing to drift. Epidemic is the same shape on N nodes — `Plan*`+`Apply*` (or just `Apply*`) per node.
+
+New protocol surface: `InfectionSpec` / `DeploymentSpec` / plan types in `pandemic-protocol` (shared by CLI, agent, REST, console, and later epidemic), plus `Plan*` / `Apply*` `AgentRequest` variants. `Apply*` receives a **resolved, concrete** plan — never a raw templated spec.
 
 ## State & Ownership
 
@@ -190,6 +186,14 @@ pandemic-cli infection uninstall <name>
 
 `--dry-run` resolves, renders, and prints the full plan — packages, files with diffs against what's on disk, user and unit actions — without applying. This is the "plan" view: the review moment before root does anything.
 
+## Console & API Surface
+
+The deployment lifecycle is a first-class surface in the REST API and the web console, not just the CLI. Both are thin passthroughs over `Plan*` / `Apply*` (see Execution Model).
+
+- **REST** (`pandemic-rest`): `GET /api/admin/deployments` (list), `GET /api/admin/deployments/:name` (status), `POST /api/admin/deployments` (install — body: spec path/name + `vars`), `DELETE /api/admin/deployments/:name` (remove). Registry `source` resolution happens here (REST is already the registry proxy), so the root agent never fetches.
+- **Console** (`pandemic-console`): a **Deployments** tab (list, status, install, remove) alongside Services / Users / Groups / Registry.
+- **Capability gate**: the agent advertises a `deployment` capability in `GetCapabilities`; REST surfaces it at `/api/admin/capabilities`; the console shows the Deployments tab only when present. This degrades gracefully against older agents and reuses the mechanism the existing tabs already rely on.
+
 ## Registry Distribution
 
 Both layers are distributable. Infection specs are the publishable atom; a deployment is a thin manifest referencing infection names. `source = "mosquitto"` + `--registry-url` resolves exactly like `registry install` today. Publishing extends the existing release workflow: a spec index alongside the binary index.
@@ -203,17 +207,22 @@ Both layers are distributable. Infection specs are the publishable atom; a deplo
 ## Security Considerations
 
 - A registry-fetched spec applied as root is a privilege-escalation channel. Checksums (then signatures, shared with epidemic) are required before `source = "<registry-name>"` is considered production-ready.
+- **Registry resolution stays client-side for now** (option a): the agent's `Plan*` / `Apply*` never do a network fetch — the client (CLI/REST) resolves `source = "<name>"` and sends a concrete spec. Agent-side resolution (option b) is deferred to **Hardening**, gated on the checksums/signatures above.
 - `WriteFile` is path-restricted in v1: allowlisted prefixes (`/etc`, `/opt`, `/usr/local`, `/var`), and never the agent secret, socket dir, or agent/daemon binaries.
 - Variables may carry secret values; rendered state files are `0600` root-only. Secret *management* itself is out of scope — `pandemic-iam` is the planned home.
 
 ## Implementation Plan
 
-1. **Schema & render** — `InfectionSpec` / `DeploymentSpec` in `pandemic-protocol`; TOML parsing, variable resolution, validation. Pure logic, unit-tested.
-2. **Agent primitives** — `PackageInstall`, `WriteFile` handlers; package-manager detection (extend `GetCapabilities`). E2E via the dockerized-systemd template in `e2e/`.
-3. **Infection apply** — `infection install/status/uninstall` + state dir. The standalone path works end-to-end here.
-4. **Deployment apply** — `deploy install/list/status/remove`, ownership, reverse-order removal, re-apply/upgrade.
-5. **Registry** — spec and deployment manifests in the registry index; `source` name resolution.
-6. **Hardening** — dry-run diffs, checksums, audit log of applied steps, best-effort rollback.
+Phases 1–4 are done (CLI-driven). The pivot: the install apply-loop currently lives in the CLI binary, while removal / state / status already live in the agent — consolidate install into the agent so every surface is a passthrough.
+
+1. **Schema & render** — (done) `InfectionSpec` / `DeploymentSpec` in `pandemic-protocol`; TOML parsing, variable resolution, validation (shared `pandemic-protocol::spec`).
+2. **Agent primitives** — (done) `PackageInstall`, `WriteFile` handlers; package-manager detection via `GetCapabilities`.
+3. **Infection apply** — (done) `infection install/status/uninstall` + state dir. Standalone path works end-to-end (agent-owned state; install apply still CLI-driven).
+4. **Deployment apply** — (done) `deploy install/list/status/remove`, ownership, reverse-order removal, re-apply/upgrade. Removal + state agent-owned; install apply still CLI-driven.
+5. **Plan/Apply consolidation** — move the install apply-loop into the agent as `Plan*` (pure) / `Apply*` (privileged); CLI becomes a passthrough; install / removal / state all agent-owned and symmetric.
+6. **Deployment UX** — REST `/api/admin/deployments*` + console Deployments tab, capability-gated on a new `deployment` token.
+7. **Registry** — spec and deployment manifests in the registry index; `source` name resolution (client-side; see Security).
+8. **Hardening** — dry-run diffs, checksums, audit log of applied steps, best-effort rollback; **revisit agent-side registry resolution (option b) now that checksums exist.**
 
 ## Open Questions
 
