@@ -3,7 +3,7 @@
 //! After a successful `infection install`, the CLI tells the agent to
 //! [`record_infection`], which writes `/etc/pandemic/infections/<name>/state.toml`
 //! (dir 0700, file 0600 — the record holds resolved variable values that may
-//! be secrets). [`load_state`] reads it back, falling back to the legacy
+//! be secrets). [`load_state_in`] reads it back, falling back to the legacy
 //! `<name>.toml` written by `service attach`, so status/uninstall cover both
 //! install paths.
 
@@ -79,7 +79,7 @@ pub fn list_infections_in(root: &str) -> Result<Vec<InfectionState>> {
             if state_file.is_file() {
                 states.push(read_state_file(&state_file)?);
             }
-            // A state dir without state.toml is corrupt; `load_state`
+            // A state dir without state.toml is corrupt; `load_state_in`
             // reports it for the specific name, so listing stays usable.
         } else if path.is_file() && entry.file_name().to_string_lossy().ends_with(".toml") {
             states.push(legacy_state(&path)?);
@@ -95,11 +95,6 @@ fn read_state_file(path: &Path) -> Result<InfectionState> {
     let state: InfectionState = toml::from_str(&text)
         .with_context(|| format!("parsing infection state in {}", path.display()))?;
     Ok(state)
-}
-
-/// Load the recorded state for `name` under the default root.
-pub fn load_state(name: &str) -> Result<InfectionState> {
-    load_state_in(INFECTIONS_DIR, name)
 }
 
 /// Load state for `name` from `root`, preferring the recorded
@@ -205,7 +200,13 @@ fn legacy_state(path: &Path) -> Result<InfectionState> {
 /// Full status of an installed infection: recorded state, live unit states,
 /// and a per-file integrity check (exists + sha256 match).
 pub async fn infection_status(name: &str) -> Result<serde_json::Value> {
-    let state = load_state(name)?;
+    infection_status_in(INFECTIONS_DIR, name).await
+}
+
+/// Full status of infection `name` recorded under `root`: recorded state,
+/// live unit states, and a per-file integrity check (exists + sha256 match).
+pub async fn infection_status_in(root: &str, name: &str) -> Result<serde_json::Value> {
+    let state = load_state_in(root, name)?;
 
     let unit_active = state.unit.as_deref().map(is_active);
     let sidecar_active = state
@@ -271,6 +272,12 @@ pub async fn uninstall_infection(name: &str) -> Result<serde_json::Value> {
 pub async fn uninstall_infection_in(root: &str, name: &str) -> Result<serde_json::Value> {
     let state = load_state_in(root, name)?;
     let mut notes = Vec::new();
+
+    if let Some(owner) = &state.owner {
+        notes.push(format!(
+            "'{name}' is owned by deployment '{owner}' — consider `pandemic-cli deploy remove {owner}` instead"
+        ));
+    }
 
     if state.attach.is_some() {
         // Attached infection: stop the sidecar, remove its unit + config.

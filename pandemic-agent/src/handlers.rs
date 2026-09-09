@@ -316,5 +316,49 @@ pub async fn handle_agent_request(request: AgentRequest) -> Response {
                 Err(e) => Response::error(format!("Failed to uninstall infection: {e}")),
             }
         }
+
+        AgentRequest::RecordDeployment { name, state } => {
+            info!(
+                "Recording deployment: {name} (version {}, {} infections)",
+                state.version,
+                state.infections.len()
+            );
+            match crate::deployments::record_deployment(&name, &state) {
+                Ok(()) => Response::success_with_data(serde_json::json!({ "name": name })),
+                Err(e) => Response::error(format!("Failed to record deployment: {e}")),
+            }
+        }
+
+        AgentRequest::ListDeployments => {
+            info!("Listing deployments");
+            match crate::deployments::list_deployments() {
+                Ok(deployments) => Response::success_with_data(serde_json::json!({
+                    "deployments": deployments
+                })),
+                Err(e) => Response::error(format!("Failed to list deployments: {e}")),
+            }
+        }
+
+        AgentRequest::GetDeploymentStatus { name } => {
+            info!("Deployment status: {name}");
+            if !crate::deployments::is_deployed(&name) {
+                return Response::not_found(format!("deployment '{name}' is not installed"));
+            }
+            match crate::deployments::deployment_status(&name).await {
+                Ok(status) => Response::success_with_data(status),
+                Err(e) => Response::error(format!("Failed to read deployment status: {e}")),
+            }
+        }
+
+        AgentRequest::RemoveDeployment { name } => {
+            info!("Removing deployment: {name}");
+            if !crate::deployments::is_deployed(&name) {
+                return Response::not_found(format!("deployment '{name}' is not installed"));
+            }
+            match crate::deployments::remove_deployment(&name).await {
+                Ok(result) => Response::success_with_data(result),
+                Err(e) => Response::error(format!("Failed to remove deployment: {e}")),
+            }
+        }
     }
 }

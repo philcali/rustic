@@ -46,7 +46,9 @@ pub use render::{
     canonical_unit_name, check_infection_collisions, render_template, resolve_deployment_variables,
     resolve_infection, validate_deployment, RenderedFile, RenderedInfection, RenderedUnit,
 };
-pub use state::{InfectionRecordedFile, InfectionState};
+pub use state::{
+    DeploymentRecordedInfection, DeploymentState, InfectionRecordedFile, InfectionState,
+};
 
 use anyhow::{bail, Result};
 

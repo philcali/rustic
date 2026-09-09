@@ -1,6 +1,8 @@
 mod agent;
+mod apply;
 mod bootstrap;
 mod daemon;
+mod deployment;
 mod infection;
 mod registry;
 mod secret;
@@ -60,6 +62,17 @@ enum Commands {
         #[command(subcommand)]
         action: InfectionAction,
     },
+    /// Spec-driven deployment lifecycle (install / list / status / remove)
+    Deploy {
+        /// agent shared secret (overrides the default path)
+        #[arg(long)]
+        agent_secret: Option<String>,
+        /// path to the agent shared secret
+        #[arg(long)]
+        agent_secret_path: Option<PathBuf>,
+        #[command(subcommand)]
+        action: DeployAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -80,6 +93,33 @@ pub enum InfectionAction {
     /// Uninstall an infection (reverse of `infection install`)
     Uninstall {
         /// Infection name
+        name: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum DeployAction {
+    /// Render and apply a deployment spec (installs its infections in order)
+    Install {
+        /// Path to the deployment spec (deployment.toml)
+        path: PathBuf,
+        /// Shared variable values: --set key=value (repeatable)
+        #[arg(long = "set")]
+        set: Vec<String>,
+        /// Print the resolved plan without touching the agent
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// List installed deployments
+    List,
+    /// Show state for one deployment, or all deployments when omitted
+    Status {
+        /// Deployment name (omit to list all)
+        name: Option<String>,
+    },
+    /// Uninstall a deployment's infections in reverse install order
+    Remove {
+        /// Deployment name
         name: String,
     },
 }
@@ -301,6 +341,11 @@ async fn main() -> Result<()> {
             agent_secret_path,
             action,
         } => infection::handle_infection_command(action, agent_secret, agent_secret_path).await?,
+        Commands::Deploy {
+            agent_secret,
+            agent_secret_path,
+            action,
+        } => deployment::handle_deploy_command(action, agent_secret, agent_secret_path).await?,
     }
 
     Ok(())

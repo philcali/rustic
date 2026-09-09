@@ -461,6 +461,226 @@ docker exec -u root pandemic-e2e pandemic-cli infection uninstall reqvar
 
 Expected: error naming `api_key`, then `api_key = "sk-live-abc"`.
 
+## Example: deployment lifecycle (phase 4)
+
+`deploy` composes several infections under one name, owns them, and removes
+them as a unit. A deployment renders every infection (shared variables +
+per-infection `vars` bindings) before applying anything, installs them in
+`order`, records itself as each infection's **owner**, and `deploy remove`
+uninstalls only the infections it owns — in **reverse** order — leaving
+standalone and foreign infections alone. A deployment name maps to one
+infection set: it cannot adopt an infection that is standalone or owned by
+another deployment (v1: refuse, not merge). Prereq: the bootstrap section
+above (secret minted, `pandemic-agent` started).
+
+A config-only infection (order 1) and a unit-owning infection (order 2) that
+cross-wires the shared `host`/`api_port`:
+
+```bash
+docker exec -u root pandemic-e2e bash -c '
+mkdir -p /opt/specs/webapp/api/files /opt/specs/webapp/web/files
+cat > /opt/specs/webapp/deployment.toml <<"EOF"
+[deployment]
+name = "webapp"
+version = "1.0.0"
+
+[variables]
+host = "127.0.0.1"
+api_port = "8080"
+
+[[infections]]
+name = "api"
+source = "./api/infection.toml"
+order = 1
+vars = { port = "{{api_port}}" }
+
+[[infections]]
+name = "web"
+source = "./web/infection.toml"
+order = 2
+vars = { host = "{{host}}", api_port = "{{api_port}}" }
+EOF
+cat > /opt/specs/webapp/api/infection.toml <<"EOF"
+[infection]
+name = "api"
+version = "1.0.0"
+
+[variables]
+port = { default = "9000" }
+
+[files]
+"api.conf" = { target = "/etc/webapp/api.conf", owner = "root", mode = "0600" }
+
+[health]
+check = ["true"]
+EOF
+cat > /opt/specs/webapp/api/files/api.conf <<"EOF"
+port = {{ port }}
+EOF
+cat > /opt/specs/webapp/web/infection.toml <<"EOF"
+[infection]
+name = "web"
+version = "1.0.0"
+
+[variables]
+host = { default = "localhost" }
+api_port = { default = "9000" }
+
+[files]
+"web.conf" = { target = "/etc/webapp/web.conf", owner = "root", mode = "0644" }
+
+[systemd]
+unit_file = "web.service"
+enable = true
+
+[health]
+check = ["systemctl", "is-active", "web"]
+EOF
+cat > /opt/specs/webapp/web/files/web.conf <<"EOF"
+backend = http://{{ host }}:{{ api_port }}
+EOF
+cat > /opt/specs/webapp/web/web.service <<"EOF"
+[Unit]
+Description=Web service (E2E)
+After=network.target
+
+[Service]
+ExecStart=/bin/sleep infinity
+
+[Install]
+WantedBy=multi-user.target
+EOF'
+```
+
+### A. Install, status, list
+
+```bash
+# Dry run is offline: render the whole plan, print it, touch nothing
+docker exec -u root pandemic-e2e pandemic-cli \
+  deploy install /opt/specs/webapp/deployment.toml --dry-run
+
+# Real install: api (order 1), then web (order 2, unit enabled + active)
+docker exec -u root pandemic-e2e pandemic-cli \
+  deploy install /opt/specs/webapp/deployment.toml
+
+# Files rendered from the *templates* with the resolved variables
+docker exec pandemic-e2e cat /etc/webapp/api.conf      # → port = 8080
+docker exec pandemic-e2e cat /etc/webapp/web.conf      # → backend = http://127.0.0.1:8080
+docker exec pandemic-e2e systemctl is-active web        # → active
+
+# Ownership recorded: infection list shows OWNER=[webapp]
+docker exec -u root pandemic-e2e pandemic-cli infection status
+
+# deploy list + status (re-checks unit active + re-hashes recorded files)
+docker exec -u root pandemic-e2e pandemic-cli deploy list
+docker exec -u root pandemic-e2e pandemic-cli deploy status webapp
+
+# State on disk: dir 0700 / state.toml 0600, resolved vars + ordered infections
+docker exec pandemic-e2e stat -c '%a %n' /etc/pandemic/deployments/webapp
+docker exec pandemic-e2e cat /etc/pandemic/deployments/webapp/state.toml
+docker exec pandemic-e2e grep owner /etc/pandemic/infections/web/state.toml  # → owner = "webapp"
+```
+
+### B. Re-apply / upgrade (idempotent)
+
+Same name + same infection set = an upgrade. `--set` re-renders the files;
+the unit is *restarted*, not duplicated.
+
+```bash
+docker exec -u root pandemic-e2e pandemic-cli \
+  deploy install /opt/specs/webapp/deployment.toml --set api_port=9090
+docker exec pandemic-e2e cat /etc/webapp/web.conf   # → backend = http://127.0.0.1:9090
+docker exec pandemic-e2e systemctl is-active web    # → active (still one unit)
+docker exec -u root pandemic-e2e pandemic-cli deploy status webapp | grep api_port  # → "9090"
+```
+
+### C. Remove (reverse order, ownership-respecting)
+
+Install a *standalone* infection first; `deploy remove` must leave it alone.
+
+```bash
+docker exec -u root pandemic-e2e bash -c '
+mkdir -p /opt/specs/lonely/files
+cat > /opt/specs/lonely/infection.toml <<"EOF"
+[infection]
+name = "lonely"
+version = "0.5.0"
+
+[files]
+"lonely.conf" = { target = "/etc/lonely/lonely.conf", owner = "root", mode = "0644" }
+
+[health]
+check = ["true"]
+EOF
+cat > /opt/specs/lonely/files/lonely.conf <<"EOF"
+standalone = true
+EOF'
+docker exec -u root pandemic-e2e pandemic-cli infection install /opt/specs/lonely/infection.toml
+
+# Remove the deployment: web (order 2) then api (order 1); lonely untouched
+docker exec -u root pandemic-e2e pandemic-cli deploy remove webapp
+docker exec pandemic-e2e sh -c '
+  echo "web unit:   $(systemctl is-active web)"          # → inactive
+  echo "lonely:     $(test -f /etc/lonely/lonely.conf && echo PRESENT || echo GONE)"   # → PRESENT
+  echo "api state:  $(test -d /etc/pandemic/infections/api && echo present || echo removed)" # → removed
+  echo "record:     $(test -d /etc/pandemic/deployments/webapp && echo present || echo removed)" # → removed'
+```
+
+Expected: `inactive` / `PRESENT` / `removed` / `removed`.
+
+### D. Ownership refusals (each exits non-zero)
+
+```bash
+# Standalone install over a deployment-owned infection is refused
+docker exec -u root pandemic-e2e pandemic-cli \
+  deploy install /opt/specs/webapp/deployment.toml     # re-own web/api
+docker exec -u root pandemic-e2e pandemic-cli \
+  infection install /opt/specs/webapp/api/infection.toml || echo "  ^ owned by webapp"
+
+# A deployment cannot adopt a standalone infection
+docker exec -u root pandemic-e2e pandemic-cli \
+  infection install /opt/specs/lonely/infection.toml   # (re)install as standalone
+docker exec -u root pandemic-e2e bash -c '
+  mkdir -p /opt/specs/steal && cp -r /opt/specs/lonely /opt/specs/steal/lonely
+  printf "%s\n" "[deployment]" "name = \"steal\"" "version = \"0.1.0\"" \
+    "" "[[infections]]" "name = \"lonely\"" "source = \"./lonely/infection.toml\"" "order = 1" \
+    > /opt/specs/steal/deployment.toml'
+docker exec -u root pandemic-e2e pandemic-cli \
+  deploy install /opt/specs/steal/deployment.toml || echo "  ^ already standalone"
+
+# ...and cannot adopt one owned by *another* deployment
+docker exec -u root pandemic-e2e bash -c '
+  mkdir -p /opt/specs/shared/files
+  cat > /opt/specs/shared/infection.toml <<"EOF"
+[infection]
+name = "shared-svc"
+version = "1.0.0"
+
+[files]
+"svc.conf" = { target = "/etc/shared/svc.conf", owner = "root", mode = "0644" }
+
+[health]
+check = ["true"]
+EOF
+  cat > /opt/specs/shared/files/svc.conf <<"EOF"
+svc = on
+EOF
+  mkdir -p /opt/specs/team-a /opt/specs/team-b
+  cp -r /opt/specs/shared /opt/specs/team-a/shared
+  cp -r /opt/specs/shared /opt/specs/team-b/shared
+  for t in team-a team-b; do
+    printf "%s\n" "[deployment]" "name = \"$t\"" "version = \"1.0.0\"" \
+      "" "[[infections]]" "name = \"shared-svc\"" "source = \"./shared/infection.toml\"" "order = 1" \
+      > /opt/specs/$t/deployment.toml
+  done'
+docker exec -u root pandemic-e2e pandemic-cli deploy install /opt/specs/team-a/deployment.toml
+docker exec -u root pandemic-e2e pandemic-cli \
+  deploy install /opt/specs/team-b/deployment.toml || echo "  ^ owned by team-a"
+```
+
+Expected: each refusal names the owning deployment / "standalone" and exits
+non-zero, with no foreign record created.
+
 ## Debugging
 
 ```bash

@@ -36,7 +36,7 @@ mod time_format {
 /// resolution, and `{{name}}` rendering.
 pub mod spec;
 
-use spec::InfectionState;
+use spec::{DeploymentState, InfectionState};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HealthMetrics {
@@ -212,6 +212,31 @@ pub enum AgentRequest {
     /// Uninstall an infection (reverse of install, driven by recorded state)
     UninstallInfection {
         /// infection name
+        name: String,
+    },
+
+    // Spec-driven deployment lifecycle (ideas/deployments.md, phase 4)
+    /// Record the state of an installed deployment (0600 root-only)
+    RecordDeployment {
+        /// deployment name
+        name: String,
+        /// the recorded state (resolved shared variables, owned infections
+        /// in install order)
+        state: DeploymentState,
+    },
+    /// List installed deployments
+    ListDeployments,
+    /// Status of one deployment: recorded state + each owned infection's
+    /// live state (missing infections are reported, not an error)
+    GetDeploymentStatus {
+        /// deployment name
+        name: String,
+    },
+    /// Remove a deployment: uninstall its owned infections in reverse
+    /// order, then drop the record. Infections not owned by it are
+    /// left untouched.
+    RemoveDeployment {
+        /// deployment name
         name: String,
     },
 }
@@ -576,6 +601,64 @@ mod tests {
                     name: "rest".to_string(),
                 },
                 r#""type":"UninstallInfection""#,
+            ),
+        ] {
+            let json = serde_json::to_string(&req).unwrap();
+            assert!(json.contains(tag), "missing {tag} in {json}");
+            let back: AgentRequest = serde_json::from_str(&json).unwrap();
+            assert_eq!(serde_json::to_string(&back).unwrap(), json);
+        }
+    }
+
+    #[test]
+    fn test_deployment_lifecycle_request_roundtrips() {
+        use spec::{DeploymentRecordedInfection, DeploymentState};
+
+        let state = DeploymentState {
+            name: "rest-stack".to_string(),
+            version: "1.2.0".to_string(),
+            variables: {
+                let mut m = std::collections::BTreeMap::new();
+                m.insert("port".to_string(), "8080".to_string());
+                m
+            },
+            infections: vec![DeploymentRecordedInfection {
+                name: "rest".to_string(),
+                version: "0.4.0".to_string(),
+                order: 1,
+                source: "rest/infection.toml".to_string(),
+            }],
+            installed_at: None,
+        };
+
+        let request = AgentRequest::RecordDeployment {
+            name: "rest-stack".to_string(),
+            state: state.clone(),
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains(r#""type":"RecordDeployment""#));
+        let back: AgentRequest = serde_json::from_str(&json).unwrap();
+        match back {
+            AgentRequest::RecordDeployment { name, state } => {
+                assert_eq!(name, "rest-stack");
+                assert_eq!(state, state);
+            }
+            other => panic!("Expected RecordDeployment, got {other:?}"),
+        }
+
+        for (req, tag) in [
+            (AgentRequest::ListDeployments, r#""type":"ListDeployments""#),
+            (
+                AgentRequest::GetDeploymentStatus {
+                    name: "rest-stack".to_string(),
+                },
+                r#""type":"GetDeploymentStatus""#,
+            ),
+            (
+                AgentRequest::RemoveDeployment {
+                    name: "rest-stack".to_string(),
+                },
+                r#""type":"RemoveDeployment""#,
             ),
         ] {
             let json = serde_json::to_string(&req).unwrap();

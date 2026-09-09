@@ -1,9 +1,15 @@
-//! Recorded infection state (ideas/deployments.md, phase 3).
+//! Recorded install state (ideas/deployments.md, phases 3-4).
 //!
 //! After a successful `infection install`, the agent records an
 //! [`InfectionState`] at `/etc/pandemic/infections/<name>/state.toml`
 //! (0600, root-only). The record is what `infection status` reports and
 //! what `infection uninstall` reverses — ownership is data, not inference.
+//!
+//! After a successful `deploy install`, the agent records a
+//! [`DeploymentState`] at `/etc/pandemic/deployments/<name>/state.toml`
+//! (0600, root-only): the resolved shared variables and the ordered
+//! infections it owns, so `deploy remove` can uninstall them in reverse
+//! and leave standalone infections alone.
 
 use std::collections::BTreeMap;
 
@@ -73,6 +79,48 @@ pub struct InfectionState {
 
 fn default_state_interval() -> u64 {
     30
+}
+
+/// One infection a deployment installed, in install order.
+///
+/// The infection's own recorded state (files, unit, variables) lives in
+/// `/etc/pandemic/infections/<name>/state.toml`; the deployment record only
+/// needs to know what it owns and in what order, so removal can run in
+/// reverse.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeploymentRecordedInfection {
+    /// Infection name (must match the infection's recorded state).
+    pub name: String,
+    /// Infection version as recorded at install time.
+    pub version: String,
+    /// Position in the deployment's `order` (lower = installed first).
+    pub order: u64,
+    /// Where the infection spec came from (path or registry name), for
+    /// reporting.
+    pub source: String,
+}
+
+/// Recorded state of an installed deployment (ideas/deployments.md, phase 4).
+///
+/// Stored at `/etc/pandemic/deployments/<name>/state.toml` (0600,
+/// root-only). `variables` holds the *resolved* shared variables and may
+/// contain secrets — the record stays 0600 root-only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeploymentState {
+    /// Deployment name.
+    pub name: String,
+    /// Deployment version.
+    pub version: String,
+    /// Resolved shared variables (may contain secrets).
+    #[serde(default)]
+    pub variables: BTreeMap<String, String>,
+    /// Infections owned by this deployment, in install order.
+    pub infections: Vec<DeploymentRecordedInfection>,
+    /// Install time (RFC 3339); stamped by the agent at record time.
+    #[serde(default)]
+    pub installed_at: Option<String>,
 }
 
 #[cfg(test)]
@@ -148,5 +196,70 @@ health_interval = 30
         assert_eq!(state.name, "old");
         assert!(state.owner.is_none());
         assert!(state.groups.is_empty());
+    }
+
+    fn deployment_sample() -> DeploymentState {
+        DeploymentState {
+            name: "rest-stack".into(),
+            version: "1.2.0".into(),
+            variables: {
+                let mut m = BTreeMap::new();
+                m.insert("port".to_string(), "8080".to_string());
+                m.insert("api_key".to_string(), "s3cr3t".to_string());
+                m
+            },
+            infections: vec![
+                DeploymentRecordedInfection {
+                    name: "rest".into(),
+                    version: "0.4.0".into(),
+                    order: 1,
+                    source: "rest/infection.toml".into(),
+                },
+                DeploymentRecordedInfection {
+                    name: "rest-metrics".into(),
+                    version: "0.1.0".into(),
+                    order: 2,
+                    source: "metrics/infection.toml".into(),
+                },
+            ],
+            installed_at: Some("2026-09-06T00:00:00Z".into()),
+        }
+    }
+
+    #[test]
+    fn deployment_state_toml_roundtrip() {
+        let state = deployment_sample();
+        let toml = toml::to_string(&state).unwrap();
+        let back: DeploymentState = toml::from_str(&toml).unwrap();
+        assert_eq!(back, state);
+        assert_eq!(back.name, "rest-stack");
+        assert_eq!(back.infections.len(), 2);
+        assert_eq!(back.infections[1].name, "rest-metrics");
+        assert_eq!(back.variables["api_key"], "s3cr3t");
+    }
+
+    #[test]
+    fn deployment_state_json_roundtrip() {
+        let state = deployment_sample();
+        let json = serde_json::to_string(&state).unwrap();
+        let back: DeploymentState = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, state);
+    }
+
+    #[test]
+    fn deployment_state_tolerates_missing_optional_fields() {
+        // A record written before `variables`/`installed_at` existed loads.
+        let toml = r#"
+name = "old"
+version = "1.0.0"
+infections = [
+    { name = "rest", version = "0.4.0", order = 1, source = "rest" }
+]
+"#;
+        let state: DeploymentState = toml::from_str(toml).unwrap();
+        assert_eq!(state.name, "old");
+        assert!(state.variables.is_empty());
+        assert!(state.installed_at.is_none());
+        assert_eq!(state.infections[0].source, "rest");
     }
 }
