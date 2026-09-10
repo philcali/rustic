@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 mod time_format {
     use chrono::{DateTime, Utc};
@@ -239,6 +239,32 @@ pub enum AgentRequest {
         /// deployment name
         name: String,
     },
+
+    // Plan/Apply boundary (ideas/deployments.md, phase 5). The client does
+    // the pure `Plan` step (resolve, render, validate) and sends the
+    // concrete plan(s); the agent owns the privileged `Apply` step.
+    /// Apply a single concrete infection plan and record it. `owner` is
+    /// `None` for a standalone install, the deployment name when applied as
+    /// part of one (what makes `RemoveDeployment` precise).
+    ApplyInfection {
+        /// fully rendered infection plan
+        plan: Plan,
+        /// owning deployment name, or `None` for standalone
+        owner: Option<String>,
+    },
+    /// Apply a whole deployment: ownership pre-flight, then each infection
+    /// (in `infections` order) applied with this deployment as owner, then
+    /// the deployment record written. Mirrors [`AgentRequest::RemoveDeployment`].
+    ApplyDeployment {
+        /// deployment name
+        name: String,
+        /// deployment version (recorded)
+        version: String,
+        /// resolved shared variables (recorded)
+        variables: BTreeMap<String, String>,
+        /// per-infection record metadata + concrete plans, in install order
+        infections: Vec<ApplyDeploymentInfection>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -247,6 +273,65 @@ pub struct UserConfig {
     pub home_dir: Option<String>,
     pub groups: Option<Vec<String>>,
     pub system_user: Option<bool>,
+}
+
+/// A rendered file ready to write (rendered content + host placement).
+///
+/// Carried inside [`Plan`] so an `Apply*` request is fully concrete — the
+/// agent writes it as-is and never sees a template.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RenderedFile {
+    pub target: String,
+    pub content: String,
+    pub owner: String,
+    pub mode: String,
+}
+
+/// The unit an install owns, rendered to /etc/systemd/system/.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlanUnit {
+    pub name: String,
+    pub target: String,
+    pub content: String,
+    pub enable: bool,
+}
+
+/// The fully rendered, pre-flight plan for one infection install
+/// (ideas/deployments.md, phase 5 — the Plan/Apply boundary).
+///
+/// This is the *concrete* artifact of the pure `Plan` step: variables
+/// resolved, every template rendered, the unit/attach chosen. It is sent
+/// to the agent as an `ApplyInfection`/`ApplyDeployment` request, which
+/// executes it with its privileged primitives. `declared_packages` is the
+/// raw per-manager list — the agent picks the manager its own host supports.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Plan {
+    pub name: String,
+    pub version: String,
+    pub description: String,
+    pub variables: BTreeMap<String, String>,
+    pub files: Vec<RenderedFile>,
+    pub unit: Option<PlanUnit>,
+    pub attach: Option<String>,
+    pub health_check: Vec<String>,
+    pub health_interval: u64,
+    /// The spec's non-empty `[packages]` entries. The agent selects the
+    /// manager this host supports (see `spec::select_packages`).
+    pub declared_packages: BTreeMap<String, Vec<String>>,
+    pub groups: Vec<String>,
+    pub users: Vec<(String, UserConfig)>,
+}
+
+/// One infection inside [`AgentRequest::ApplyDeployment`]: its recorded
+/// metadata (name/version/order/source) plus the concrete [`Plan`] the agent
+/// will apply.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApplyDeploymentInfection {
+    pub name: String,
+    pub version: String,
+    pub order: u64,
+    pub source: String,
+    pub plan: Plan,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -58,6 +58,39 @@ use anyhow::{bail, Result};
 /// its host supports and errors if none match.
 pub const KNOWN_PACKAGE_MANAGERS: &[&str] = &["apt", "dnf", "pacman", "apk", "zypper"];
 
+/// Pick the package manager + packages for a host from a spec's declared
+/// `[packages]` and the host's supported managers.
+///
+/// Pure — the caller supplies `supported` (the agent uses its own detected
+/// managers; a client uses a `GetCapabilities` fetch for dry-run reporting).
+/// Errors if the spec declares packages but the host supports none of them.
+pub fn select_packages(
+    declared: &std::collections::BTreeMap<String, Vec<String>>,
+    supported: &[String],
+) -> Result<Option<(String, Vec<String>)>> {
+    if declared.is_empty() {
+        return Ok(None);
+    }
+    let chosen = KNOWN_PACKAGE_MANAGERS.iter().copied().find(|manager| {
+        declared
+            .get(*manager)
+            .map(|list| !list.is_empty() && supported.iter().any(|s| s == *manager))
+            .unwrap_or(false)
+    });
+    match chosen {
+        Some(manager) => Ok(Some((manager.to_string(), declared[manager].clone()))),
+        None => Err(anyhow::anyhow!(
+            "spec lists packages for [{}] but this host supports [{}]",
+            declared.keys().cloned().collect::<Vec<_>>().join(", "),
+            if supported.is_empty() {
+                "no known manager (apt, dnf, pacman, apk, zypper)".to_string()
+            } else {
+                supported.join(", ")
+            }
+        )),
+    }
+}
+
 /// Infection and deployment names share one charset rule: 1-63 lowercase
 /// ASCII letters, digits, or hyphens, with no leading or trailing hyphen.
 pub fn validate_infection_name(name: &str) -> Result<()> {

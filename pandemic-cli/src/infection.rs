@@ -17,9 +17,7 @@ use anyhow::{bail, Context, Result};
 use pandemic_protocol::spec::{parse_infection_spec, InfectionSpec};
 use pandemic_protocol::AgentRequest;
 
-use crate::apply::{
-    apply_infection, build_plan, fetch_supported_managers, parse_set_args, select_packages,
-};
+use crate::apply::{build_plan_from_spec, parse_set_args};
 use crate::service::agent_action;
 
 pub async fn handle_infection_command(
@@ -50,11 +48,6 @@ async fn install(
         .with_context(|| format!("reading infection spec {}", spec_path.display()))?;
     let spec: InfectionSpec = parse_infection_spec(&text)
         .with_context(|| format!("parsing infection spec {}", spec_path.display()))?;
-    let spec_dir = spec_path
-        .parent()
-        .map(Path::to_path_buf)
-        .filter(|p| p != Path::new(""))
-        .unwrap_or_else(|| PathBuf::from("."));
 
     let declared: Vec<String> = spec.variables.keys().cloned().collect();
     let set = parse_set_args(
@@ -63,19 +56,8 @@ async fn install(
         &format!("infection '{}'", spec.meta.name),
     )?;
 
-    // Resolve + render everything before touching the host.
-    let mut plan = build_plan(
-        &spec,
-        &spec_dir,
-        &std::collections::BTreeMap::new(),
-        &std::collections::BTreeMap::new(),
-        &set,
-    )?;
-    if !plan.declared_packages.is_empty() {
-        let supported =
-            fetch_supported_managers(agent_secret.clone(), agent_secret_path.clone()).await?;
-        plan.packages = select_packages(&plan.declared_packages, &supported)?;
-    }
+    // Resolve + render everything (pure, local). The agent runs the Apply step.
+    let plan = build_plan_from_spec(spec_path, &set)?;
 
     // Ownership guard: never install over an infection a deployment owns.
     let existing = agent_action(
@@ -114,9 +96,15 @@ async fn install(
             .unwrap_or_default(),
     );
 
-    apply_infection(&plan, None, agent_secret.clone(), agent_secret_path.clone()).await?;
+    let name = plan.name.clone();
+    agent_action(
+        &AgentRequest::ApplyInfection { plan, owner: None },
+        agent_secret,
+        agent_secret_path,
+    )
+    .await?;
 
-    println!("✅ Installed infection '{}' (standalone)", plan.name);
+    println!("✅ Installed infection '{name}' (standalone)");
     Ok(())
 }
 

@@ -43,7 +43,7 @@ pub async fn handle_agent_request(request: AgentRequest) -> Response {
         AgentRequest::GetCapabilities => {
             info!("Capabilities requested");
             Response::success_with_data(serde_json::json!({
-                "capabilities": ["systemd", "service_management", "user_management", "group_management", "service_config", "infection_registry", "package_management", "file_management"],
+                "capabilities": ["systemd", "service_management", "user_management", "group_management", "service_config", "infection_registry", "package_management", "file_management", "infection_lifecycle", "deployment_lifecycle"],
                 "package_managers": crate::packages::detect_package_managers()
             }))
         }
@@ -358,6 +358,30 @@ pub async fn handle_agent_request(request: AgentRequest) -> Response {
             match crate::deployments::remove_deployment(&name).await {
                 Ok(result) => Response::success_with_data(result),
                 Err(e) => Response::error(format!("Failed to remove deployment: {e}")),
+            }
+        }
+
+        AgentRequest::ApplyInfection { plan, owner } => {
+            info!("Applying infection: {} (owner {:?})", plan.name, owner);
+            match crate::apply::apply_infection(&plan, owner.as_deref()).await {
+                Ok(result) => Response::success_with_data(result),
+                Err(e) => Response::error(format!("Failed to apply infection: {e}")),
+            }
+        }
+
+        AgentRequest::ApplyDeployment {
+            name,
+            version,
+            variables,
+            infections,
+        } => {
+            info!(
+                "Applying deployment: {name} (v{version}, {} infections)",
+                infections.len()
+            );
+            match crate::apply::apply_deployment(&name, &version, &variables, &infections).await {
+                Ok(result) => Response::success_with_data(result),
+                Err(e) => Response::error(format!("Failed to apply deployment: {e}")),
             }
         }
     }

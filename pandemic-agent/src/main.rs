@@ -1,3 +1,4 @@
+mod apply;
 mod deployments;
 mod files;
 mod handlers;

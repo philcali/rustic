@@ -19,13 +19,11 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 use pandemic_protocol::spec::{
     parse_deployment_spec, parse_infection_spec, resolve_deployment_variables, validate_deployment,
-    DeploymentRecordedInfection, DeploymentSpec, DeploymentState, InfectionSpec,
+    DeploymentSpec, InfectionSpec,
 };
 use pandemic_protocol::AgentRequest;
 
-use crate::apply::{
-    apply_infection, build_plan, fetch_supported_managers, parse_set_args, select_packages,
-};
+use crate::apply::{build_plan, parse_set_args, ApplyDeploymentInfection};
 use crate::infection::active_str;
 use crate::service::agent_action;
 
@@ -140,153 +138,40 @@ async fn install(
         return Ok(());
     }
 
-    // One capabilities fetch shared by every infection that declares packages.
-    if resolved
+    // The agent runs the Apply step: ownership pre-flight, each infection in
+    // order (recorded with this deployment as owner), then the record.
+    let infections = resolved
         .iter()
-        .any(|r| !r.plan.declared_packages.is_empty())
-    {
-        let supported =
-            fetch_supported_managers(agent_secret.clone(), agent_secret_path.clone()).await?;
-        for r in &mut resolved {
-            if !r.plan.declared_packages.is_empty() {
-                r.plan.packages = select_packages(&r.plan.declared_packages, &supported)?;
-            }
-        }
-    }
+        .map(|r| ApplyDeploymentInfection {
+            name: r.name.clone(),
+            version: r.plan.version.clone(),
+            order: r.order,
+            source: r.source.clone(),
+            plan: r.plan.clone(),
+        })
+        .collect();
 
-    // Ownership pre-flight: refuse to adopt infections that are installed
-    // but not owned by this deployment.
-    preflight_ownership(
-        &spec.meta.name,
-        &resolved,
-        agent_secret.clone(),
-        agent_secret_path.clone(),
-    )
-    .await?;
-
-    // Apply the infections in order; record the deployment only when every
-    // one succeeded (a failed apply leaves the record un-written).
-    for r in &resolved {
-        println!("Applying infection '{}' v{} ...", r.name, r.plan.version);
-        if let Err(err) = apply_infection(
-            &r.plan,
-            Some(&spec.meta.name),
-            agent_secret.clone(),
-            agent_secret_path.clone(),
-        )
-        .await
-        {
-            bail!(
-                "deployment '{}' failed on infection '{}':\n\n{err}\n\n  no deployment record was written; infections already applied remain installed",
-                spec.meta.name,
-                r.name
-            );
-        }
-        println!("   ✅ applied '{}'", r.name);
-    }
-
-    let state = DeploymentState {
-        name: spec.meta.name.clone(),
-        version: spec.meta.version.clone(),
-        variables: shared,
-        infections: resolved
-            .iter()
-            .map(|r| DeploymentRecordedInfection {
-                name: r.name.clone(),
-                version: r.plan.version.clone(),
-                order: r.order,
-                source: r.source.clone(),
-            })
-            .collect(),
-        installed_at: None, // the agent stamps it
-    };
-    agent_action(
-        &AgentRequest::RecordDeployment {
+    let data = agent_action(
+        &AgentRequest::ApplyDeployment {
             name: spec.meta.name.clone(),
-            state,
+            version: spec.meta.version.clone(),
+            variables: shared,
+            infections,
         },
         agent_secret,
         agent_secret_path,
     )
     .await?;
 
-    println!("✅ Installed deployment '{}'", spec.meta.name);
-    Ok(())
-}
-
-/// Refuse to install over infections that belong to someone else.
-///
-/// - a recorded deployment with the same name must install the *same*
-///   infection set (re-apply/upgrade), otherwise refuse;
-/// - each infection must be absent, or owned by this deployment. Standalone
-///   and foreign-owned infections are never adopted.
-async fn preflight_ownership(
-    dep_name: &str,
-    resolved: &[Resolved],
-    agent_secret: Option<String>,
-    agent_secret_path: Option<PathBuf>,
-) -> Result<()> {
-    let data = agent_action(
-        &AgentRequest::ListDeployments,
-        agent_secret.clone(),
-        agent_secret_path.clone(),
-    )
-    .await?;
-    if let Some(deps) = data.get("deployments").and_then(|v| v.as_array()) {
-        if let Some(rec) = deps
-            .iter()
-            .find(|d| d.get("name").and_then(|v| v.as_str()) == Some(dep_name))
-        {
-            let recorded: Vec<String> = rec
-                .get("infections")
-                .and_then(|v| v.as_array())
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|i| i.get("name").and_then(|v| v.as_str()).map(String::from))
-                        .collect()
-                })
-                .unwrap_or_default();
-            let current: Vec<String> = resolved.iter().map(|r| r.name.clone()).collect();
-            if recorded != current {
-                bail!(
-                    "deployment '{dep_name}' is already installed with infections [{}]\nbut this spec installs [{}]. Remove it first:\n  pandemic-cli deploy remove {dep_name}",
-                    recorded.join(", "),
-                    current.join(", ")
-                );
-            }
-        }
-    }
-
-    let data = agent_action(
-        &AgentRequest::ListInfections,
-        agent_secret,
-        agent_secret_path,
-    )
-    .await?;
-    let infections = data
-        .get("infections")
+    let applied_count = data
+        .get("applied")
         .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
-    for r in resolved {
-        if let Some(rec) = infections
-            .iter()
-            .find(|i| i.get("name").and_then(|v| v.as_str()) == Some(r.name.as_str()))
-        {
-            match rec.get("owner").and_then(|v| v.as_str()) {
-                Some(owner) if owner == dep_name => {}
-                Some(owner) => bail!(
-                    "infection '{}' is already installed and owned by deployment '{owner}'.\nRemove it first:\n  pandemic-cli deploy remove {owner}",
-                    r.name
-                ),
-                None => bail!(
-                    "infection '{}' is already installed standalone.\nRemove it first:\n  pandemic-cli infection uninstall {}",
-                    r.name,
-                    r.name
-                ),
-            }
-        }
-    }
+        .map(|a| a.len())
+        .unwrap_or(0);
+    println!(
+        "✅ Installed deployment '{}' ({} infection(s) applied)",
+        spec.meta.name, applied_count
+    );
     Ok(())
 }
 
