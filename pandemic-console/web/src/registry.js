@@ -105,7 +105,7 @@ export async function installInfection(infectionName, apiBase, apiKey, reloadPlu
             body: JSON.stringify({}),
         });
 
-        if (result.status === 'Success') {
+        if (result.status === 'success') {
             alert(`Successfully installed ${infectionName}`);
             reloadPlugins();
         } else {

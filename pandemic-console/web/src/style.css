@@ -498,3 +498,75 @@ section h3 {
     max-height: 300px;
     overflow-y: auto;
 }
+
+.deployment-item {
+    padding: 1rem;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.02);
+}
+
+.deployment-info {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    margin-bottom: 0.5rem;
+}
+
+.deployment-info strong {
+    color: var(--text-color);
+}
+
+.deployment-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem 1rem;
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    margin-bottom: 1rem;
+}
+
+.muted {
+    color: var(--text-muted);
+    font-size: 0.85rem;
+}
+
+.deployment-detail {
+    margin-top: 1rem;
+    padding: 1rem;
+    background: rgba(255, 255, 255, 0.02);
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+}
+
+.detail-block {
+    margin-bottom: 1rem;
+}
+
+.detail-block:last-child {
+    margin-bottom: 0;
+}
+
+.detail-block h4 {
+    margin: 0 0 0.5rem 0;
+    color: var(--primary-color);
+}
+
+.detail-infection {
+    padding: 0.75rem 0;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.detail-infection:last-child {
+    border-bottom: none;
+}
+
+.detail-infection > .deployment-info {
+    margin-bottom: 0.5rem;
+}
+
+.file-row {
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    white-space: pre-wrap;
+}

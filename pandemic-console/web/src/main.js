@@ -7,7 +7,7 @@ import { loadServices, toggleServiceConfig, showServiceConfig, resetServiceConfi
 import { loadUsers, deleteUser } from './users.js'
 import { loadGroups, deleteGroup } from './groups.js'
 import { searchInfections, viewInfectionManifest, installInfection } from './registry.js'
-import { setupTabs } from './tabs.js'
+import { listDeployments, viewDeployment, removeDeployment } from './deployments.js'
 
 class PandemicConsole {
     constructor() {
@@ -65,6 +65,7 @@ class PandemicConsole {
                             <button class="tab-button active" data-tab="services">Services</button>
                             <button class="tab-button" data-tab="users">Users</button>
                             <button class="tab-button" data-tab="groups">Groups</button>
+                            <button class="tab-button" data-tab="deployments" id="deployments-tab-button">Deployments</button>
                             <button class="tab-button" data-tab="registry">Registry</button>
                         </div>
 
@@ -84,6 +85,12 @@ class PandemicConsole {
                             <div id="groups-tab" class="tab-panel">
                                 <div id="groups-list" class="list-container">
                                     <div class="loading">Loading groups...</div>
+                                </div>
+                            </div>
+
+                            <div id="deployments-tab" class="tab-panel">
+                                <div id="deployments-list" class="list-container">
+                                    <div class="loading">Loading deployments...</div>
                                 </div>
                             </div>
 
@@ -157,6 +164,13 @@ class PandemicConsole {
                 this.loadGroups();
             } else {
                 adminSection.style.display = 'none';
+            }
+
+            // Deployments tab is only useful when the agent supports the lifecycle
+            const deploymentsButton = document.getElementById('deployments-tab-button');
+            if (deploymentsButton) {
+                deploymentsButton.style.display =
+                    data.capabilities.includes('deployment_lifecycle') ? '' : 'none';
             }
         } catch (error) {
             console.log('Agent capabilities check failed:', error.message);
@@ -236,6 +250,7 @@ class PandemicConsole {
             case 'services': this.loadServices(); break;
             case 'users': this.loadUsers(); break;
             case 'groups': this.loadGroups(); break;
+            case 'deployments': this.loadDeployments(); break;
             case 'registry': break; // Registry is search-based
         }
     }
@@ -266,6 +281,18 @@ class PandemicConsole {
 
     async deleteGroup(groupname) {
         await deleteGroup(groupname, this.apiBase, this.apiKey, () => this.loadGroups());
+    }
+
+    async loadDeployments() {
+        await listDeployments(this.apiBase, this.apiKey, document.getElementById('deployments-list'));
+    }
+
+    async viewDeployment(name) {
+        await viewDeployment(name, this.apiBase, this.apiKey);
+    }
+
+    async removeDeployment(name) {
+        await removeDeployment(name, this.apiBase, this.apiKey, () => this.loadDeployments());
     }
 
     toggleServiceConfig(serviceName) {
