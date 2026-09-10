@@ -12,10 +12,11 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context, Result};
 use pandemic_protocol::spec::{
-    canonical_unit_name, is_variable_name, parse_infection_spec, render_template,
-    resolve_infection, InfectionSpec,
+    canonical_unit_name, is_variable_name, parse_deployment_spec, parse_infection_spec,
+    render_template, resolve_deployment_variables, resolve_infection, validate_deployment,
+    DeploymentSpec, InfectionSpec,
 };
-use pandemic_protocol::{Plan, PlanUnit, RenderedFile, UserConfig};
+use pandemic_protocol::{ApplyDeploymentInfection, Plan, PlanUnit, RenderedFile, UserConfig};
 use sha2::{Digest, Sha256};
 
 /// Parse `--set key=value` pairs against a set of declared variable names.
@@ -201,4 +202,137 @@ pub fn build_plan_from_spec_with(
         .filter(|p| p != Path::new(""))
         .unwrap_or_else(|| PathBuf::from("."));
     build_plan(&spec, &spec_dir, bindings, shared, set)
+}
+
+/// One infection in a [`DeploymentPlan`], fully resolved and rendered.
+pub struct ResolvedInfection {
+    /// The infection's name within the deployment.
+    pub name: String,
+    /// Explicit install order (lower first).
+    pub order: u64,
+    /// The `source` as declared in the deployment spec.
+    pub source: String,
+    /// The parsed infection spec (kept for validation / tooling).
+    pub spec: InfectionSpec,
+    /// The concrete rendered plan the agent will apply.
+    pub plan: Plan,
+}
+
+/// A fully resolved + rendered deployment, ready to dry-run or apply.
+///
+/// This is the shared artifact of the deployment `Plan` step: the CLI and the
+/// REST API both build one of these and then either print it (dry-run) or send
+/// its concrete plans to the agent as an `ApplyDeployment` request.
+pub struct DeploymentPlan {
+    /// The parsed deployment spec (name, version, declared wiring).
+    pub spec: DeploymentSpec,
+    /// Resolved shared variables.
+    pub shared: BTreeMap<String, String>,
+    /// Every infection, sorted by install `order`, each with its plan.
+    pub infections: Vec<ResolvedInfection>,
+}
+
+/// The concrete plans for an `ApplyDeployment` request.
+pub fn deployment_apply_infections(dp: &DeploymentPlan) -> Vec<ApplyDeploymentInfection> {
+    dp.infections
+        .iter()
+        .map(|r| ApplyDeploymentInfection {
+            name: r.name.clone(),
+            version: r.plan.version.clone(),
+            order: r.order,
+            source: r.source.clone(),
+            plan: r.plan.clone(),
+        })
+        .collect()
+}
+
+/// Resolve a deployment `source` to a local infection spec file.
+fn resolve_source(spec_dir: &Path, source: &str) -> Result<PathBuf> {
+    let candidate = if source.contains('/') {
+        let p = Path::new(source);
+        if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            spec_dir.join(p)
+        }
+    } else {
+        bail!(
+            "source '{source}' is not a local path.\n  registry resolution arrives in a later phase (ideas/deployments.md, phase 5)"
+        )
+    };
+    if !candidate.is_file() {
+        bail!(
+            "infection spec '{source}' not found (resolved to {})",
+            candidate.display()
+        );
+    }
+    Ok(candidate)
+}
+
+/// Resolve + render every infection in a deployment spec into a concrete
+/// [`DeploymentPlan`].
+///
+/// Pure local work: reads the deployment spec, each infection spec, and every
+/// template; resolves shared + per-infection variables; renders; validates.
+/// No network, no privileged action. Shared by the CLI and REST API so they
+/// drive the identical plan.
+pub fn build_deployment_plan_from(
+    spec: &DeploymentSpec,
+    spec_dir: &Path,
+    set: &BTreeMap<String, String>,
+) -> Result<DeploymentPlan> {
+    let shared = resolve_deployment_variables(&spec.variables, set)
+        .with_context(|| "resolving deployment variables")?;
+
+    let mut infections: Vec<ResolvedInfection> = Vec::new();
+    for entry in &spec.infections {
+        let source_path = resolve_source(spec_dir, &entry.source)
+            .with_context(|| format!("resolving source for infection '{}'", entry.name))?;
+        let itext = std::fs::read_to_string(&source_path)
+            .with_context(|| format!("reading infection spec {}", source_path.display()))?;
+        let ispec = parse_infection_spec(&itext)
+            .with_context(|| format!("parsing infection spec {}", source_path.display()))?;
+        let idir = source_path
+            .parent()
+            .map(Path::to_path_buf)
+            .filter(|p| p != Path::new(""))
+            .unwrap_or_else(|| PathBuf::from("."));
+        let plan = build_plan(&ispec, &idir, &entry.vars, &shared, &BTreeMap::new())
+            .with_context(|| format!("building plan for infection '{}'", entry.name))?;
+        infections.push(ResolvedInfection {
+            name: entry.name.clone(),
+            order: entry.order,
+            source: entry.source.clone(),
+            spec: ispec,
+            plan,
+        });
+    }
+    infections.sort_by_key(|i| i.order);
+
+    let specs: Vec<InfectionSpec> = infections.iter().map(|i| i.spec.clone()).collect();
+    validate_deployment(spec, &specs)?;
+
+    Ok(DeploymentPlan {
+        spec: spec.clone(),
+        shared,
+        infections,
+    })
+}
+
+/// Read + parse a deployment spec file and build its concrete
+/// [`DeploymentPlan`]. Convenience entry point used by the REST API.
+pub fn build_deployment_plan(
+    spec_path: &Path,
+    set: &BTreeMap<String, String>,
+) -> Result<DeploymentPlan> {
+    let text = std::fs::read_to_string(spec_path)
+        .with_context(|| format!("reading deployment spec {}", spec_path.display()))?;
+    let spec = parse_deployment_spec(&text)
+        .with_context(|| format!("parsing deployment spec {}", spec_path.display()))?;
+    let spec_dir = spec_path
+        .parent()
+        .map(Path::to_path_buf)
+        .filter(|p| p != Path::new(""))
+        .unwrap_or_else(|| PathBuf::from("."));
+    build_deployment_plan_from(&spec, &spec_dir, set)
 }

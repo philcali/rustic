@@ -1,9 +1,10 @@
 //! Spec-driven deployment lifecycle (ideas/deployments.md, phase 4).
 //!
-//! `deploy install` resolves the deployment's shared variables, renders
-//! every infection's templates (all before anything is applied), checks
-//! ownership, applies the infections in `order` through the shared steps
-//! in [`crate::apply`], and records the deployment as the *owner* of each.
+//! `deploy install` does the pure `Plan` step — resolve the deployment's
+//! shared variables and render every infection's templates (all in the shared
+//! [`pandemic_common::apply`] builder) — then hands the concrete plans to the
+//! agent, which runs the privileged `Apply` step: ownership pre-flight, apply
+//! in `order`, and record the deployment as the *owner* of each.
 //!
 //! `deploy remove` uninstalls the owned infections in **reverse** order
 //! and drops the record; infections that are not owned by the deployment
@@ -13,17 +14,15 @@
 //! Registry `source` names and `--registry-url` arrive with phase 5 —
 //! `source` must be a local path for now.
 
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
-use pandemic_protocol::spec::{
-    parse_deployment_spec, parse_infection_spec, resolve_deployment_variables, validate_deployment,
-    DeploymentSpec, InfectionSpec,
-};
+use anyhow::{Context, Result};
+use pandemic_protocol::spec::parse_deployment_spec;
 use pandemic_protocol::AgentRequest;
 
-use crate::apply::{build_plan, parse_set_args, ApplyDeploymentInfection};
+use crate::apply::{
+    build_deployment_plan_from, deployment_apply_infections, parse_set_args, DeploymentPlan,
+};
 use crate::infection::active_str;
 use crate::service::agent_action;
 
@@ -44,38 +43,6 @@ pub async fn handle_deploy_command(
             remove(&name, agent_secret, agent_secret_path).await
         }
     }
-}
-
-/// One deployment infection, fully resolved and rendered.
-struct Resolved {
-    name: String,
-    order: u64,
-    source: String,
-    spec: InfectionSpec,
-    plan: crate::apply::Plan,
-}
-
-/// Resolve a deployment `source` to a local infection spec file.
-fn resolve_source(spec_dir: &Path, source: &str) -> Result<PathBuf> {
-    let candidate = if source.contains('/') {
-        let p = Path::new(source);
-        if p.is_absolute() {
-            p.to_path_buf()
-        } else {
-            spec_dir.join(p)
-        }
-    } else {
-        bail!(
-            "source '{source}' is not a local path.\n  registry resolution arrives in a later phase (ideas/deployments.md, phase 5)"
-        )
-    };
-    if !candidate.is_file() {
-        bail!(
-            "infection spec '{source}' not found (resolved to {})",
-            candidate.display()
-        );
-    }
-    Ok(candidate)
 }
 
 async fn install(
@@ -101,61 +68,23 @@ async fn install(
         &declared,
         &format!("deployment '{}'", spec.meta.name),
     )?;
-    let shared = resolve_deployment_variables(&spec.variables, &set)
-        .with_context(|| "resolving deployment variables")?;
 
-    // Resolve + render every infection before touching the host.
-    let mut resolved: Vec<Resolved> = Vec::new();
-    for entry in &spec.infections {
-        let source_path = resolve_source(&spec_dir, &entry.source)
-            .with_context(|| format!("resolving source for infection '{}'", entry.name))?;
-        let itext = std::fs::read_to_string(&source_path)
-            .with_context(|| format!("reading infection spec {}", source_path.display()))?;
-        let ispec = parse_infection_spec(&itext)
-            .with_context(|| format!("parsing infection spec {}", source_path.display()))?;
-        let idir = source_path
-            .parent()
-            .map(Path::to_path_buf)
-            .filter(|p| p != Path::new(""))
-            .unwrap_or_else(|| PathBuf::from("."));
-        let plan = build_plan(&ispec, &idir, &entry.vars, &shared, &BTreeMap::new())
-            .with_context(|| format!("building plan for infection '{}'", entry.name))?;
-        resolved.push(Resolved {
-            name: entry.name.clone(),
-            order: entry.order,
-            source: entry.source.clone(),
-            spec: ispec,
-            plan,
-        });
-    }
-    resolved.sort_by_key(|r| r.order);
-
-    let specs: Vec<InfectionSpec> = resolved.iter().map(|r| r.spec.clone()).collect();
-    validate_deployment(&spec, &specs)?;
+    // Pure Plan step (shared with the REST API): resolve + render + validate.
+    let dp = build_deployment_plan_from(&spec, &spec_dir, &set)?;
 
     if dry_run {
-        print_dry_run(&spec, &shared, &resolved);
+        print_dry_run(&dp);
         return Ok(());
     }
 
     // The agent runs the Apply step: ownership pre-flight, each infection in
     // order (recorded with this deployment as owner), then the record.
-    let infections = resolved
-        .iter()
-        .map(|r| ApplyDeploymentInfection {
-            name: r.name.clone(),
-            version: r.plan.version.clone(),
-            order: r.order,
-            source: r.source.clone(),
-            plan: r.plan.clone(),
-        })
-        .collect();
-
+    let infections = deployment_apply_infections(&dp);
     let data = agent_action(
         &AgentRequest::ApplyDeployment {
-            name: spec.meta.name.clone(),
-            version: spec.meta.version.clone(),
-            variables: shared,
+            name: dp.spec.meta.name.clone(),
+            version: dp.spec.meta.version.clone(),
+            variables: dp.shared.clone(),
             infections,
         },
         agent_secret,
@@ -170,24 +99,24 @@ async fn install(
         .unwrap_or(0);
     println!(
         "✅ Installed deployment '{}' ({} infection(s) applied)",
-        spec.meta.name, applied_count
+        dp.spec.meta.name, applied_count
     );
     Ok(())
 }
 
 /// The `--dry-run` view: everything resolved and rendered, nothing applied.
-fn print_dry_run(spec: &DeploymentSpec, shared: &BTreeMap<String, String>, resolved: &[Resolved]) {
+fn print_dry_run(dp: &DeploymentPlan) {
     println!(
         "DRY RUN — deployment '{}' v{} (nothing will be applied)",
-        spec.meta.name, spec.meta.version
+        dp.spec.meta.name, dp.spec.meta.version
     );
-    if !shared.is_empty() {
+    if !dp.shared.is_empty() {
         println!("\nshared variables:");
-        for (key, value) in shared {
+        for (key, value) in &dp.shared {
             println!("  {key} = {value}");
         }
     }
-    for r in resolved {
+    for r in &dp.infections {
         println!(
             "\ninfection '{}' v{} (order {}, source {})",
             r.name, r.plan.version, r.order, r.source

@@ -11,7 +11,7 @@ use pandemic_protocol::{
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -406,6 +406,123 @@ pub async fn install_infection(
     let request = AgentRequest::InstallInfection {
         name,
         target_path: payload.target_path,
+    };
+    let agent_client = AgentClient::new().with_secret(&state.agent_secret);
+    let response = agent_client.send_agent_request(&request);
+    format_pandemic_response(response.await)
+}
+
+// Deployment lifecycle handlers (ideas/deployments.md, phase 4).
+//
+// The pure `Plan` step (resolve + render + validate) lives in the shared
+// `pandemic_common::apply` builder, so the REST API drives the identical
+// plan the CLI does; the agent runs the privileged `Apply` step.
+
+pub async fn list_deployments(
+    State(state): State<AppState>,
+    Extension(scopes): Extension<Vec<String>>,
+) -> ApiResult {
+    require_scope!(&state.auth_config, &scopes, "admin");
+
+    let request = AgentRequest::ListDeployments;
+    let agent_client = AgentClient::new().with_secret(&state.agent_secret);
+    let response = agent_client.send_agent_request(&request);
+    format_pandemic_response(response.await)
+}
+
+pub async fn get_deployment(
+    Path(name): Path<String>,
+    State(state): State<AppState>,
+    Extension(scopes): Extension<Vec<String>>,
+) -> ApiResult {
+    require_scope!(&state.auth_config, &scopes, "admin");
+
+    let request = AgentRequest::GetDeploymentStatus { name };
+    let agent_client = AgentClient::new().with_secret(&state.agent_secret);
+    let response = agent_client.send_agent_request(&request);
+    format_pandemic_response(response.await)
+}
+
+pub async fn remove_deployment(
+    Path(name): Path<String>,
+    State(state): State<AppState>,
+    Extension(scopes): Extension<Vec<String>>,
+) -> ApiResult {
+    require_scope!(&state.auth_config, &scopes, "admin");
+
+    let request = AgentRequest::RemoveDeployment { name };
+    let agent_client = AgentClient::new().with_secret(&state.agent_secret);
+    let response = agent_client.send_agent_request(&request);
+    format_pandemic_response(response.await)
+}
+
+#[derive(Deserialize)]
+pub struct DeploymentInstallPayload {
+    /// Path to the deployment spec (`pandemic-full.toml`).
+    path: String,
+    /// Variable overrides (like the CLI `--set`); defaults to the spec's.
+    #[serde(default)]
+    vars: BTreeMap<String, String>,
+    /// When true, return the resolved + rendered plan without applying.
+    #[serde(default)]
+    dry_run: bool,
+}
+
+/// `POST /api/admin/deployments` — the Plan/Apply consolidation.
+///
+/// Builds the concrete deployment plan (resolve + render + validate), then
+/// either returns it (dry-run) or hands the concrete plans to the agent to
+/// apply: ownership pre-flight, each infection in `order`, then the record.
+pub async fn install_deployment(
+    State(state): State<AppState>,
+    Extension(scopes): Extension<Vec<String>>,
+    Json(payload): Json<DeploymentInstallPayload>,
+) -> ApiResult {
+    require_scope!(&state.auth_config, &scopes, "admin");
+
+    let dp = match pandemic_common::build_deployment_plan(
+        std::path::Path::new(&payload.path),
+        &payload.vars,
+    ) {
+        Ok(dp) => dp,
+        Err(e) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({"status": "error", "message": e.to_string()})),
+            ))
+        }
+    };
+
+    if payload.dry_run {
+        let infections = dp
+            .infections
+            .iter()
+            .map(|r| {
+                json!({
+                    "name": r.name,
+                    "order": r.order,
+                    "source": r.source,
+                    "version": r.plan.version,
+                    "plan": r.plan,
+                })
+            })
+            .collect::<Vec<_>>();
+        return Ok(Json(json!({
+            "status": "success",
+            "data": {
+                "name": dp.spec.meta.name,
+                "version": dp.spec.meta.version,
+                "shared_variables": dp.shared,
+                "infections": infections,
+            }
+        })));
+    }
+
+    let request = AgentRequest::ApplyDeployment {
+        name: dp.spec.meta.name.clone(),
+        version: dp.spec.meta.version.clone(),
+        variables: dp.shared.clone(),
+        infections: pandemic_common::deployment_apply_infections(&dp),
     };
     let agent_client = AgentClient::new().with_secret(&state.agent_secret);
     let response = agent_client.send_agent_request(&request);

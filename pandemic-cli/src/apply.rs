@@ -6,5 +6,7 @@
 //! reached through `ApplyInfection`/`ApplyDeployment`. This module keeps a
 //! single import site for the CLI's infection/deployment commands.
 
-pub use pandemic_common::apply::{build_plan, build_plan_from_spec, parse_set_args};
-pub use pandemic_protocol::{ApplyDeploymentInfection, Plan};
+pub use pandemic_common::apply::{
+    build_deployment_plan_from, build_plan_from_spec, deployment_apply_infections, parse_set_args,
+    DeploymentPlan,
+};
