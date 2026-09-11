@@ -75,7 +75,7 @@ async fn install(
             .and_then(|v| v.as_str())
         {
             bail!(
-                "infection '{}' is owned by deployment '{owner}'. Remove the deployment first:\n  pandemic-cli deploy remove {owner}",
+                "infection '{}' is owned by deployment '{owner}'. Remove the deployment first:\n  pandemic-cli deployment remove {owner}",
                 plan.name
             );
         }

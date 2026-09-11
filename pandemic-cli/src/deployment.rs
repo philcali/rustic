@@ -1,14 +1,14 @@
 //! Spec-driven deployment lifecycle (ideas/deployments.md, phase 4).
 //!
-//! `deploy install` does the pure `Plan` step — resolve the deployment's
+//! `deployment install` does the pure `Plan` step — resolve the deployment's
 //! shared variables and render every infection's templates (all in the shared
 //! [`pandemic_common::apply`] builder) — then hands the concrete plans to the
 //! agent, which runs the privileged `Apply` step: ownership pre-flight, apply
 //! in `order`, and record the deployment as the *owner* of each.
 //!
-//! `deploy remove` uninstalls the owned infections in **reverse** order
+//! `deployment remove` uninstalls the owned infections in **reverse** order
 //! and drops the record; infections that are not owned by the deployment
-//! are left untouched. Re-running `deploy install` under an existing name
+//! are left untouched. Re-running `deployment install` under an existing name
 //! is an idempotent re-apply/upgrade.
 //!
 //! Registry `source` names and `--registry-url` arrive with phase 5 —
@@ -26,20 +26,20 @@ use crate::apply::{
 use crate::infection::active_str;
 use crate::service::agent_action;
 
-pub async fn handle_deploy_command(
-    action: crate::DeployAction,
+pub async fn handle_deployment_command(
+    action: crate::DeploymentAction,
     agent_secret: Option<String>,
     agent_secret_path: Option<PathBuf>,
 ) -> Result<()> {
     match action {
-        crate::DeployAction::Install { path, set, dry_run } => {
+        crate::DeploymentAction::Install { path, set, dry_run } => {
             install(&path, &set, dry_run, agent_secret, agent_secret_path).await
         }
-        crate::DeployAction::List => list(agent_secret, agent_secret_path).await,
-        crate::DeployAction::Status { name } => {
+        crate::DeploymentAction::List => list(agent_secret, agent_secret_path).await,
+        crate::DeploymentAction::Status { name } => {
             status(name.as_deref(), agent_secret, agent_secret_path).await
         }
-        crate::DeployAction::Remove { name } => {
+        crate::DeploymentAction::Remove { name } => {
             remove(&name, agent_secret, agent_secret_path).await
         }
     }
@@ -411,7 +411,7 @@ async fn remove(
     }
     if !record_removed {
         println!(
-            "\n  re-run `pandemic-cli deploy remove {name}` to finish — already-removed infections are skipped"
+            "\n  re-run `pandemic-cli deployment remove {name}` to finish — already-removed infections are skipped"
         );
     }
     Ok(())

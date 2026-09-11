@@ -15,12 +15,12 @@ This is the prerequisite for epidemic: epidemic spreads a *deployment* (spec + v
 
 ```bash
 # One command, four infections, wired together
-pandemic-cli deploy install ./pandemic-full.toml --set host=10.0.1.5
+pandemic-cli deployment install ./pandemic-full.toml --set host=10.0.1.5
 
 # Inspect / tear down
-pandemic-cli deploy list
-pandemic-cli deploy status pandemic-full
-pandemic-cli deploy remove pandemic-full
+pandemic-cli deployment list
+pandemic-cli deployment status pandemic-full
+pandemic-cli deployment remove pandemic-full
 
 # A single infection, standalone
 pandemic-cli infection install ./mosquitto.toml --set port=1883
@@ -31,7 +31,7 @@ pandemic-cli infection install ./mosquitto.toml --set port=1883
 1. **Infections don't know about each other.** An infection declares the variables it needs; it never references another service's port, URL, or name.
 2. **Wiring lives in the deployment.** Cross-infection references (`api_url = "http://{{host}}:{{rest_port}}"`) exist only at the deployment level. This is what keeps infections reusable across deployments.
 3. **The agent owns apply; the boundary is a verb, not a process.** Each install splits into `Plan*` (pure — resolve, render, validate, return a concrete plan; no privileged ops) and `Apply*` (privileged — execute the concrete plan and record state). Removal, state, and status already live in the agent; install is consolidated there too. CLI, REST, and the console are thin passthroughs — they express intent, they don't re-implement the loop. Nothing privileged happens until `Apply*`.
-4. **A deployment owns what it installs.** Ownership is recorded so `deploy remove` is precise and standalone infections are left alone.
+4. **A deployment owns what it installs.** Ownership is recorded so `deployment remove` is precise and standalone infections are left alone.
 5. **Not Ansible.** A small fixed schema: packages, files, users/groups, unit-or-attach, health. No arbitrary command execution in v1.
 
 ## Infection Schema
@@ -167,17 +167,17 @@ New protocol surface: `InfectionSpec` / `DeploymentSpec` / plan types in `pandem
 
 - Infection: `/etc/pandemic/infections/<name>/` — resolved spec, variable values, file list with sha256, unit name, install timestamp. (Generalizes the current `/etc/pandemic/infections/<name>.toml` written by attach.)
 - Deployment: `/etc/pandemic/deployments/<name>.toml` — spec, resolved variables, ordered owned infections.
-- `deploy status` compares recorded state to host reality: unit active/inactive, rendered file hashes.
-- `deploy remove` applies infections in reverse order; infections not owned by the deployment are untouched.
-- Re-running `deploy install` under an existing name = idempotent re-apply/upgrade: diff rendered files, replace changed ones, restart affected units.
+- `deployment status` compares recorded state to host reality: unit active/inactive, rendered file hashes.
+- `deployment remove` applies infections in reverse order; infections not owned by the deployment are untouched.
+- Re-running `deployment install` under an existing name = idempotent re-apply/upgrade: diff rendered files, replace changed ones, restart affected units.
 
 ## CLI Surface
 
 ```
-pandemic-cli deploy install <path|name> [--set k=v ...] [--registry-url URL] [--dry-run]
-pandemic-cli deploy list
-pandemic-cli deploy status [name]
-pandemic-cli deploy remove <name>
+pandemic-cli deployment install <path|name> [--set k=v ...] [--registry-url URL] [--dry-run]
+pandemic-cli deployment list
+pandemic-cli deployment status [name]
+pandemic-cli deployment remove <name>
 
 pandemic-cli infection install <path> [--set k=v ...]
 pandemic-cli infection status [name]
@@ -202,7 +202,7 @@ Both layers are distributable. Infection specs are the publishable atom; a deplo
 
 - **Attach**: the mosquitto half of the motivating example is `[files]` + `attach` with no packages or own unit — the schema covers mixed shapes without special cases.
 - **Bootstrap**: conceptually the first deployment (daemon + agent). Stays a special case until the schema proves itself, then can be expressed as one.
-- **Epidemic**: the payload becomes `{ deployment, vars }`; each node runs the same `deploy install`. Transport and levels in `epidemic_infections.md` are unchanged — this doc is what they spread.
+- **Epidemic**: the payload becomes `{ deployment, vars }`; each node runs the same `deployment install`. Transport and levels in `epidemic_infections.md` are unchanged — this doc is what they spread.
 
 ## Security Considerations
 
@@ -218,7 +218,7 @@ Phases 1–4 are done (CLI-driven). The pivot: the install apply-loop currently 
 1. **Schema & render** — (done) `InfectionSpec` / `DeploymentSpec` in `pandemic-protocol`; TOML parsing, variable resolution, validation (shared `pandemic-protocol::spec`).
 2. **Agent primitives** — (done) `PackageInstall`, `WriteFile` handlers; package-manager detection via `GetCapabilities`.
 3. **Infection apply** — (done) `infection install/status/uninstall` + state dir. Standalone path works end-to-end (agent-owned state; install apply still CLI-driven).
-4. **Deployment apply** — (done) `deploy install/list/status/remove`, ownership, reverse-order removal, re-apply/upgrade. Removal + state agent-owned; install apply still CLI-driven.
+4. **Deployment apply** — (done) `deployment install/list/status/remove`, ownership, reverse-order removal, re-apply/upgrade. Removal + state agent-owned; install apply still CLI-driven.
 5. **Plan/Apply consolidation** — move the install apply-loop into the agent as `Plan*` (pure) / `Apply*` (privileged); CLI becomes a passthrough; install / removal / state all agent-owned and symmetric.
 6. **Deployment UX** — REST `/api/admin/deployments*` + console Deployments tab, capability-gated on a new `deployment` token.
 7. **Registry** — spec and deployment manifests in the registry index; `source` name resolution (client-side; see Security).
@@ -228,4 +228,4 @@ Phases 1–4 are done (CLI-driven). The pivot: the install apply-loop currently 
 
 - Template engine: `{{var}}` substitution only in v1? (leaning yes; minijinja when conditionals are actually needed)
 - Package installs: `install` with version-pin strings in v1, or plain names? (leaning pins — "full blown infection" should be reproducible)
-- Naming: CLI verb blessed as `deploy`; "plan" is the `--dry-run` view. Confirm before phase 3.
+- Naming: CLI resource noun is `deployment` (renamed from `deploy` to match `infection`); "plan" is the `--dry-run` view.

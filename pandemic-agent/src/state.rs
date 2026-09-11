@@ -275,7 +275,7 @@ pub async fn uninstall_infection_in(root: &str, name: &str) -> Result<serde_json
 
     if let Some(owner) = &state.owner {
         notes.push(format!(
-            "'{name}' is owned by deployment '{owner}' — consider `pandemic-cli deploy remove {owner}` instead"
+            "'{name}' is owned by deployment '{owner}' — consider `pandemic-cli deployment remove {owner}` instead"
         ));
     }
 

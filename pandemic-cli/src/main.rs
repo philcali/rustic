@@ -63,7 +63,7 @@ enum Commands {
         action: InfectionAction,
     },
     /// Spec-driven deployment lifecycle (install / list / status / remove)
-    Deploy {
+    Deployment {
         /// agent shared secret (overrides the default path)
         #[arg(long)]
         agent_secret: Option<String>,
@@ -71,7 +71,7 @@ enum Commands {
         #[arg(long)]
         agent_secret_path: Option<PathBuf>,
         #[command(subcommand)]
-        action: DeployAction,
+        action: DeploymentAction,
     },
 }
 
@@ -98,7 +98,7 @@ pub enum InfectionAction {
 }
 
 #[derive(Subcommand)]
-pub enum DeployAction {
+pub enum DeploymentAction {
     /// Render and apply a deployment spec (installs its infections in order)
     Install {
         /// Path to the deployment spec (deployment.toml)
@@ -341,11 +341,11 @@ async fn main() -> Result<()> {
             agent_secret_path,
             action,
         } => infection::handle_infection_command(action, agent_secret, agent_secret_path).await?,
-        Commands::Deploy {
+        Commands::Deployment {
             agent_secret,
             agent_secret_path,
             action,
-        } => deployment::handle_deploy_command(action, agent_secret, agent_secret_path).await?,
+        } => deployment::handle_deployment_command(action, agent_secret, agent_secret_path).await?,
     }
 
     Ok(())

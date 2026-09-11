@@ -5,10 +5,10 @@
 //! (0600, root-only). The record is what `infection status` reports and
 //! what `infection uninstall` reverses — ownership is data, not inference.
 //!
-//! After a successful `deploy install`, the agent records a
+//! After a successful `deployment install`, the agent records a
 //! [`DeploymentState`] at `/etc/pandemic/deployments/<name>/state.toml`
 //! (0600, root-only): the resolved shared variables and the ordered
-//! infections it owns, so `deploy remove` can uninstall them in reverse
+//! infections it owns, so `deployment remove` can uninstall them in reverse
 //! and leave standalone infections alone.
 
 use std::collections::BTreeMap;

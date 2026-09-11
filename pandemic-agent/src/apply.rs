@@ -308,7 +308,7 @@ fn preflight_ownership(dep_name: &str, infections: &[ApplyDeploymentInfection]) 
         let rec_infections: Vec<String> = rec.infections.iter().map(|i| i.name.clone()).collect();
         if rec_infections != current {
             bail!(
-                "deployment '{dep_name}' is already installed with infections [{}]\nbut this spec installs [{}]. Remove it first:\n  pandemic-cli deploy remove {dep_name}",
+                "deployment '{dep_name}' is already installed with infections [{}]\nbut this spec installs [{}]. Remove it first:\n  pandemic-cli deployment remove {dep_name}",
                 rec_infections.join(", "),
                 current.join(", ")
             );
@@ -321,7 +321,7 @@ fn preflight_ownership(dep_name: &str, infections: &[ApplyDeploymentInfection]) 
             match &rec.owner {
                 Some(owner) if owner == dep_name => {}
                 Some(owner) => bail!(
-                    "infection '{}' is already installed and owned by deployment '{owner}'.\nRemove it first:\n  pandemic-cli deploy remove {owner}",
+                    "infection '{}' is already installed and owned by deployment '{owner}'.\nRemove it first:\n  pandemic-cli deployment remove {owner}",
                     inf.name
                 ),
                 None => bail!(

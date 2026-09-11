@@ -4,7 +4,7 @@
  * Read-only (plus remove). Install is deliberately NOT in the console yet —
  * the `POST /api/admin/deployments` path+vars flow will be reworked around
  * the registry (ideas/deployments.md, phase 5), which simplifies the UX.
- * Mirrors the CLI `pandemic-cli deploy ...` surface.
+ * Mirrors the CLI `pandemic-cli deployment ...` surface.
  */
 import { apiRequest } from './api.js';
 

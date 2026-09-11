@@ -1,6 +1,6 @@
 //! Recorded deployment state (ideas/deployments.md, phase 4).
 //!
-//! After a successful `deploy install`, the CLI tells the agent to
+//! After a successful `deployment install`, the CLI tells the agent to
 //! [`record_deployment`], which writes
 //! `/etc/pandemic/deployments/<name>/state.toml` (dir 0700, file 0600 —
 //! the record holds resolved shared variables that may be secrets).
@@ -170,7 +170,7 @@ pub async fn remove_deployment(name: &str) -> Result<serde_json::Value> {
 ///   with a note; it is never touched.
 ///
 /// If any uninstall fails, the deployment record is **kept** (so
-/// `deploy remove` can be re-run — already-removed infections are skipped
+/// `deployment remove` can be re-run — already-removed infections are skipped
 /// as missing) and `record_removed` is false.
 pub async fn remove_deployment_in(
     dep_root: &str,
