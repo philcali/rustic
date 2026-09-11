@@ -34,9 +34,20 @@ pub struct RegistryIndex {
 pub struct InfectionSummary {
     pub name: String,
     pub latest_version: String,
+    /// Discriminant: `infection` (binary), `infection-spec`, or `deployment`.
+    /// The wire key is `type`; `type_` is the Rust name (reserved word).
+    #[serde(rename = "type")]
     pub type_: String,
     pub description: String,
-    pub manifest_url: String,
+    /// Binary entries: URL of the per-name JSON manifest (platforms + binaries).
+    #[serde(default)]
+    pub manifest_url: Option<String>,
+    /// Spec/deployment entries: URL of the spec+files bundle (tar.gz).
+    #[serde(default)]
+    pub bundle_url: Option<String>,
+    /// sha256 of the bundle (spec/deployment entries).
+    #[serde(default)]
+    pub checksum: Option<String>,
 }
 
 pub struct RegistryClient {
@@ -94,9 +105,15 @@ impl RegistryClient {
         for registry_url in &self.registries {
             if let Ok(index) = self.fetch_registry_index(registry_url).await {
                 if let Some(summary) = index.infections.get(name) {
+                    let manifest_url = summary.manifest_url.clone().ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "'{name}' has no binary manifest (type {}); use its spec bundle instead",
+                            summary.type_
+                        )
+                    })?;
                     let manifest = self
                         .client
-                        .get(&summary.manifest_url)
+                        .get(&manifest_url)
                         .send()
                         .await?
                         .json::<InfectionManifest>()
@@ -169,5 +186,108 @@ impl RegistryClient {
 impl Default for RegistryClient {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The shape `scripts/generate-registry.sh` emits today: a `type` key (not
+    /// `type_`) and a `manifest_url`. This is the bug the `#[serde(rename)]`
+    /// fix addresses — before it, this failed to deserialize.
+    #[test]
+    fn parses_binary_index_shape() {
+        let json = r#"{
+            "name": "Pandemic Infections Registry",
+            "description": "test",
+            "infections": {
+                "mosquitto": {
+                    "name": "mosquitto",
+                    "latest_version": "2.0",
+                    "description": "MQTT broker",
+                    "type": "infection",
+                    "manifest_url": "https://x/registry/mosquitto.json"
+                },
+                "pandemic-cli": {
+                    "name": "pandemic-cli",
+                    "latest_version": "0.4.0",
+                    "description": "core",
+                    "type": "core",
+                    "manifest_url": "https://x/registry/pandemic-cli.json"
+                }
+            }
+        }"#;
+
+        let index: RegistryIndex = serde_json::from_str(json).expect("binary index parses");
+        let m = &index.infections["mosquitto"];
+        assert_eq!(m.type_, "infection");
+        assert_eq!(m.manifest_url.as_deref(), Some("https://x/registry/mosquitto.json"));
+        assert_eq!(m.bundle_url, None);
+        assert_eq!(m.checksum, None);
+        assert_eq!(index.infections["pandemic-cli"].type_, "core");
+    }
+
+    /// Spec/deployment atoms: `type` discriminant, a `bundle_url` + `checksum`,
+    /// and *no* `manifest_url` (all three optional).
+    #[test]
+    fn parses_spec_and_deployment_entries() {
+        let json = r#"{
+            "name": "Pandemic Registry",
+            "description": "test",
+            "infections": {
+                "rest": {
+                    "name": "rest",
+                    "latest_version": "0.4.0",
+                    "description": "REST API spec",
+                    "type": "infection-spec",
+                    "bundle_url": "https://x/registry/specs/infections/rest.tar.gz",
+                    "checksum": "deadbeef"
+                },
+                "pandemic-full": {
+                    "name": "pandemic-full",
+                    "latest_version": "0.4.0",
+                    "description": "full stack",
+                    "type": "deployment",
+                    "bundle_url": "https://x/registry/specs/deployments/pandemic-full.tar.gz",
+                    "checksum": "cafe0123"
+                }
+            }
+        }"#;
+
+        let index: RegistryIndex = serde_json::from_str(json).expect("spec index parses");
+        let rest = &index.infections["rest"];
+        assert_eq!(rest.type_, "infection-spec");
+        assert_eq!(rest.manifest_url, None);
+        assert_eq!(
+            rest.bundle_url.as_deref(),
+            Some("https://x/registry/specs/infections/rest.tar.gz")
+        );
+        assert_eq!(rest.checksum.as_deref(), Some("deadbeef"));
+
+        let dep = &index.infections["pandemic-full"];
+        assert_eq!(dep.type_, "deployment");
+        assert_eq!(dep.bundle_url.as_deref(), Some("https://x/registry/specs/deployments/pandemic-full.tar.gz"));
+        assert_eq!(dep.checksum.as_deref(), Some("cafe0123"));
+    }
+
+    /// Serde round-trip is stable (Serialize emits the `type` key, Deserialize
+    /// reads it back).
+    #[test]
+    fn summary_round_trips() {
+        let summary = InfectionSummary {
+            name: "rest".into(),
+            latest_version: "0.4.0".into(),
+            type_: "infection-spec".into(),
+            description: "d".into(),
+            manifest_url: None,
+            bundle_url: Some("https://x/b.tar.gz".into()),
+            checksum: Some("abc".into()),
+        };
+        let json = serde_json::to_string(&summary).unwrap();
+        assert!(json.contains("\"type\":\"infection-spec\""), "emits `type` key, got {json}");
+        let back: InfectionSummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.type_, "infection-spec");
+        assert_eq!(back.bundle_url.as_deref(), Some("https://x/b.tar.gz"));
     }
 }
