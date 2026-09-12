@@ -1,0 +1,4 @@
+# Rendered by the `rest` infection.
+bind_address = "{{ bind_address }}"
+port = "{{ port }}"
+socket_path = "{{ socket_path }}"

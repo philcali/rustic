@@ -1,0 +1,12 @@
+[Unit]
+Description=Pandemic REST API
+After=network.target
+
+[Service]
+User=rest
+Group=rest
+ExecStart=/usr/local/bin/pandemic-rest --socket {{ socket_path }} --port {{ port }}
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

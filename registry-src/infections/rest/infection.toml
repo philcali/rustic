@@ -1,0 +1,26 @@
+[infection]
+name = "rest"
+version = "0.4.0"
+description = "Pandemic REST API"
+
+[variables]
+socket_path  = { default = "/var/run/pandemic/pandemic.sock" }
+port         = { default = "8080" }
+bind_address = { default = "127.0.0.1" }
+
+[groups]
+rest = {}
+
+[users]
+rest = { group = "rest", system = true }
+
+[files]
+"rest-auth.toml" = { target = "/etc/pandemic/rest-auth.toml", owner = "root", mode = "0600" }
+
+[systemd]
+unit_file = "rest.service"
+enable = true
+
+[health]
+check = ["curl", "-sf", "http://127.0.0.1:{{port}}/health"]
+interval = 15
