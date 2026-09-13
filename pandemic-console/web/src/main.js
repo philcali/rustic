@@ -7,7 +7,11 @@ import { loadServices, toggleServiceConfig, showServiceConfig, resetServiceConfi
 import { loadUsers, deleteUser } from './users.js'
 import { loadGroups, deleteGroup } from './groups.js'
 import { searchInfections, viewInfectionManifest, installInfection } from './registry.js'
-import { listDeployments, viewDeployment, removeDeployment } from './deployments.js'
+import {
+    listDeployments, viewDeployment, removeDeployment,
+    setupDeploymentInstall, previewDeploymentInstall, applyDeploymentInstall,
+    clearDeploymentInstall, addDeploymentVar,
+} from './deployments.js'
 
 class PandemicConsole {
     constructor() {
@@ -22,6 +26,7 @@ class PandemicConsole {
         this.render();
         await this.checkAgentCapabilities();
         this.setupEventListeners();
+        setupDeploymentInstall();
         this.loadHealth();
         this.setupWebSocket();
         this.loadPlugins();
@@ -89,6 +94,29 @@ class PandemicConsole {
                             </div>
 
                             <div id="deployments-tab" class="tab-panel">
+                                <div class="deployment-install">
+                                    <h4>Install a deployment</h4>
+                                    <div class="install-source">
+                                        <label><input type="radio" name="deployment-source" value="name" checked> Registry name</label>
+                                        <input type="text" id="deployment-name" placeholder="e.g. rest-mqtt" autocomplete="off">
+                                        <label><input type="radio" name="deployment-source" value="path"> Spec path</label>
+                                        <input type="text" id="deployment-path" placeholder="/path/to/deployment.toml" autocomplete="off" style="display: none;">
+                                    </div>
+                                    <div class="install-vars">
+                                        <div class="install-vars-header">
+                                            <span>Variable overrides (optional)</span>
+                                            <button type="button" onclick="window.pandemicConsole.addDeploymentVar()">+ Add variable</button>
+                                        </div>
+                                        <div id="deployment-vars"></div>
+                                    </div>
+                                    <div class="install-actions">
+                                        <button id="deployment-preview-btn" class="primary" onclick="window.pandemicConsole.previewDeploymentInstall()">1. Preview plan</button>
+                                        <button id="deployment-apply-btn" class="primary" style="display: none;" onclick="window.pandemicConsole.applyDeploymentInstall()">2. Apply deployment</button>
+                                        <button id="deployment-clear-btn" style="display: none;" onclick="window.pandemicConsole.clearDeploymentInstall()">Clear</button>
+                                    </div>
+                                    <div id="deployment-preview"></div>
+                                </div>
+
                                 <div id="deployments-list" class="list-container">
                                     <div class="loading">Loading deployments...</div>
                                 </div>
@@ -293,6 +321,22 @@ class PandemicConsole {
 
     async removeDeployment(name) {
         await removeDeployment(name, this.apiBase, this.apiKey, () => this.loadDeployments());
+    }
+
+    async previewDeploymentInstall() {
+        await previewDeploymentInstall(this.apiBase, this.apiKey);
+    }
+
+    async applyDeploymentInstall() {
+        await applyDeploymentInstall(this.apiBase, this.apiKey, () => this.loadDeployments());
+    }
+
+    clearDeploymentInstall() {
+        clearDeploymentInstall();
+    }
+
+    addDeploymentVar() {
+        addDeploymentVar();
     }
 
     toggleServiceConfig(serviceName) {

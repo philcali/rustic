@@ -1,12 +1,23 @@
 /**
- * Deployment lifecycle: list / status / remove.
+ * Deployment lifecycle: install (preview → apply), list, status, remove.
  *
- * Read-only (plus remove). Install is deliberately NOT in the console yet —
- * the `POST /api/admin/deployments` path+vars flow will be reworked around
- * the registry (ideas/deployments.md, phase 5), which simplifies the UX.
- * Mirrors the CLI `pandemic-cli deployment ...` surface.
+ * Install is two-step by design: `POST /api/admin/deployments` with
+ * `dry_run: true` returns the rendered plan; the user reviews it, then the
+ * identical payload is sent with `dry_run: false`. Mirrors the CLI
+ * `pandemic-cli deployment ...` surface (ideas/deployments.md, phase 6).
+ *
+ * Variable *values* and rendered file contents are never shown in the browser
+ * (values may be secrets; the state record is 0600 root-only) — only names,
+ * target paths, and modes.
  */
 import { apiRequest } from './api.js';
+
+/** Escape a value for safe interpolation into an HTML string. */
+function esc(value) {
+    return String(value).replace(/[&<>"']/g, c => (
+        { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+    ));
+}
 
 // Shared-variable values may be secrets (the record is 0600 root-only), so the
 // browser only ever shows their *names* — never their values.
@@ -153,4 +164,222 @@ export async function removeDeployment(name, apiBase, apiKey, reloadDeployments)
     } catch (error) {
         alert(`Removal failed: ${error.message}`);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Install — always two-step: preview the rendered plan, then apply it.
+// The payload of the last successful preview is remembered; Apply re-sends
+// exactly that payload with `dry_run: false`. Any form edit invalidates the
+// preview so the plan can never drift from what gets applied.
+// ---------------------------------------------------------------------------
+
+let pendingInstall = null; // { name?, path?, vars } from the last good preview
+
+/**
+ * Wire up the install panel (source radios, preview invalidation).
+ * Called once from the console after render.
+ */
+export function setupDeploymentInstall() {
+    const showSourceInput = () => {
+        const mode = document.querySelector('input[name="deployment-source"]:checked').value;
+        document.getElementById('deployment-name').style.display = mode === 'name' ? '' : 'none';
+        document.getElementById('deployment-path').style.display = mode === 'path' ? '' : 'none';
+    };
+    document.querySelectorAll('input[name="deployment-source"]').forEach(r =>
+        r.addEventListener('change', () => { showSourceInput(); invalidateInstallPreview(); }));
+
+    ['deployment-name', 'deployment-path'].forEach(id =>
+        document.getElementById(id).addEventListener('input', invalidateInstallPreview));
+    document.getElementById('deployment-vars').addEventListener('input', invalidateInstallPreview);
+}
+
+/**
+ * Add an empty variable override row to the install form.
+ */
+export function addDeploymentVar() {
+    const row = document.createElement('div');
+    row.className = 'var-row';
+    row.innerHTML = `
+        <input class="var-key" type="text" placeholder="variable name" autocomplete="off">
+        <input class="var-value" type="text" placeholder="value" autocomplete="off">
+        <button class="danger" type="button" title="Remove variable"
+                onclick="this.closest('.var-row').remove()">×</button>`;
+    document.getElementById('deployment-vars').appendChild(row);
+    row.querySelector('.var-key').focus();
+}
+
+/**
+ * Reset the whole install panel (form + preview).
+ */
+export function clearDeploymentInstall() {
+    invalidateInstallPreview();
+    document.getElementById('deployment-name').value = '';
+    document.getElementById('deployment-path').value = '';
+    document.getElementById('deployment-vars').innerHTML = '';
+    document.querySelector('input[name="deployment-source"][value="name"]').checked = true;
+    document.getElementById('deployment-name').style.display = '';
+    document.getElementById('deployment-path').style.display = 'none';
+}
+
+function invalidateInstallPreview() {
+    pendingInstall = null;
+    document.getElementById('deployment-preview').innerHTML = '';
+    document.getElementById('deployment-apply-btn').style.display = 'none';
+    document.getElementById('deployment-clear-btn').style.display = 'none';
+}
+
+function readInstallForm() {
+    const vars = {};
+    document.querySelectorAll('#deployment-vars .var-row').forEach(row => {
+        const key = row.querySelector('.var-key').value.trim();
+        if (!key) return;
+        vars[key] = row.querySelector('.var-value').value;
+    });
+    const mode = document.querySelector('input[name="deployment-source"]:checked').value;
+    if (mode === 'name') {
+        const name = document.getElementById('deployment-name').value.trim();
+        if (!name) throw new Error('Enter a registry deployment name (e.g. rest-mqtt)');
+        return { name, vars };
+    }
+    const path = document.getElementById('deployment-path').value.trim();
+    if (!path) throw new Error('Enter a local deployment spec path (…/deployment.toml)');
+    return { path, vars };
+}
+
+function errorBlock(message) {
+    return `<div class="error">${esc(message)}</div>`;
+}
+
+/**
+ * Step 1 — resolve + render the plan (`dry_run: true`) and display it.
+ */
+export async function previewDeploymentInstall(apiBase, apiKey) {
+    const previewEl = document.getElementById('deployment-preview');
+    const btn = document.getElementById('deployment-preview-btn');
+    let payload;
+    try {
+        payload = readInstallForm();
+    } catch (e) {
+        previewEl.innerHTML = errorBlock(e.message);
+        return;
+    }
+    btn.disabled = true;
+    previewEl.innerHTML = '<div class="loading">Resolving and rendering plan...</div>';
+    try {
+        const result = await apiRequest(apiBase, apiKey, '/api/admin/deployments', {
+            method: 'POST',
+            body: JSON.stringify({ ...payload, dry_run: true }),
+        });
+        pendingInstall = payload;
+        previewEl.innerHTML = renderPlanPreview(result.data || {});
+        document.getElementById('deployment-apply-btn').style.display = '';
+        document.getElementById('deployment-clear-btn').style.display = '';
+    } catch (error) {
+        pendingInstall = null;
+        document.getElementById('deployment-apply-btn').style.display = 'none';
+        document.getElementById('deployment-clear-btn').style.display = '';
+        previewEl.innerHTML = errorBlock(`Preview failed: ${error.message}`);
+    } finally {
+        btn.disabled = false;
+    }
+}
+
+/**
+ * Step 2 — apply the previewed plan (same payload, `dry_run: false`).
+ */
+export async function applyDeploymentInstall(apiBase, apiKey, reloadDeployments) {
+    if (!pendingInstall) return;
+    const label = pendingInstall.name || pendingInstall.path;
+    if (!confirm(
+        `Apply deployment '${label}'?\n\n` +
+        `This installs every infection in the previewed plan (as root, via the agent).`,
+    )) return;
+    const btn = document.getElementById('deployment-apply-btn');
+    const previewEl = document.getElementById('deployment-preview');
+    btn.disabled = true;
+    previewEl.innerHTML = '<div class="loading">Applying deployment...</div>';
+    try {
+        const result = await apiRequest(apiBase, apiKey, '/api/admin/deployments', {
+            method: 'POST',
+            body: JSON.stringify({ ...pendingInstall, dry_run: false }),
+        });
+        const d = result.data || {};
+        previewEl.innerHTML = `<div class="success">
+            Deployment '${esc(d.name || label)}' applied.
+            ${(d.applied || []).length ? ` Infections installed: ${(d.applied || []).map(esc).join(', ')}.` : ''}
+        </div>`;
+        pendingInstall = null;
+        document.getElementById('deployment-apply-btn').style.display = 'none';
+        document.getElementById('deployment-clear-btn').style.display = '';
+        reloadDeployments();
+    } catch (error) {
+        previewEl.innerHTML = errorBlock(`Apply failed: ${error.message}\n\nYou can retry the apply, or clear the panel to start over.`);
+    } finally {
+        btn.disabled = false;
+    }
+}
+
+// --- plan preview rendering (names/targets/modes only, never values or contents) ---
+
+function variableNamesBlock(vars) {
+    const names = Object.keys(vars || {});
+    if (names.length === 0) return '';
+    return `<div class="plan-row">
+        <span class="plan-label">variables</span>
+        <span>${names.map(n => `<span class="version">${esc(n)}</span>`).join(' ')}
+            <span class="muted">(values hidden)</span></span>
+    </div>`;
+}
+
+function planRow(label, inner) {
+    if (!inner) return '';
+    return `<div class="plan-row"><span class="plan-label">${label}</span><span>${inner}</span></div>`;
+}
+
+function renderPlanInfection(r) {
+    const p = r.plan || {};
+    const packages = Object.entries(p.declared_packages || {})
+        .map(([mgr, list]) => `${esc(mgr)}: ${list.map(esc).join(', ')}`)
+        .join(' · ');
+    const files = (p.files || [])
+        .map(f => `${esc(f.target)} <span class="muted">${esc(f.owner)}:${esc(f.mode)}</span>`)
+        .join(', ');
+    const users = (p.users || [])
+        .map(u => esc(Array.isArray(u) ? u[0] : (u && u.name) || '?'))
+        .join(', ');
+    const unit = p.unit
+        ? `${esc(p.unit.name)}${p.unit.enable ? ' <span class="muted">(enabled at boot)</span>' : ''}`
+        : '';
+    const health = (p.health_check || []).length
+        ? `every ${p.health_interval}s <span class="muted">(command hidden)</span>`
+        : '';
+    return `<div class="plan-infection">
+        <div class="plan-infection-head">
+            <strong>${esc(r.name)}</strong>
+            <span class="version">v${esc(r.version || '?')}</span>
+            <span class="muted">order ${r.order} · source: ${esc(r.source)}</span>
+        </div>
+        ${planRow('packages', packages)}
+        ${planRow('files', files)}
+        ${planRow('unit', unit)}
+        ${planRow('attach', p.attach ? esc(p.attach) : '')}
+        ${planRow('health check', health)}
+        ${planRow('groups', (p.groups || []).map(g => `<span class="version">${esc(g)}</span>`).join(' '))}
+        ${planRow('users', users)}
+        ${variableNamesBlock(p.variables)}
+    </div>`;
+}
+
+function renderPlanPreview(data) {
+    const infections = data.infections || [];
+    return `<div class="plan-preview">
+        <div class="plan-head">
+            <strong>${esc(data.name || '?')}</strong>
+            <span class="version">v${esc(data.version || '?')}</span>
+            <span class="muted">${infections.length} infection${infections.length === 1 ? '' : 's'}, installed in order</span>
+        </div>
+        ${variableNamesBlock(data.shared_variables)}
+        ${infections.map(renderPlanInfection).join('') || '<div class="empty">No infections in this deployment.</div>'}
+        <div class="muted">File contents and variable values are hidden in the preview; applying sends the fully rendered plan to the agent.</div>
+    </div>`;
 }

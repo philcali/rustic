@@ -217,16 +217,16 @@ Both layers are distributable. Infection specs are the publishable atom; a deplo
 
 ## Implementation Plan
 
-Phases 1–5 are done: the pure `Plan` step (resolve + render + validate) is consolidated in `pandemic_common`, shared by the CLI and REST, while the privileged `Apply` step runs in the agent — one code path for every surface. 6 and 7 are largely in; the console Deployments tab (6) and Hardening (8) remain.
+Phases 1–7 are done: the pure `Plan` step (resolve + render + validate) is consolidated in `pandemic_common`, shared by the CLI and REST, while the privileged `Apply` step runs in the agent — one code path for every surface. The console Deployments tab (6) is in, with the two-step preview → apply install flow. Only Hardening (8) remains.
 
 1. **Schema & render** — (done) `InfectionSpec` / `DeploymentSpec` in `pandemic-protocol`; TOML parsing, variable resolution, validation (shared `pandemic-protocol::spec`).
 2. **Agent primitives** — (done) `PackageInstall`, `WriteFile` handlers; package-manager detection via `GetCapabilities`.
 3. **Infection apply** — (done) `infection install/status/uninstall` + state dir. Standalone path works end-to-end (agent-owned state; install apply still CLI-driven).
 4. **Deployment apply** — (done) `deployment install/list/status/remove`, ownership, reverse-order removal, re-apply/upgrade. Removal + state agent-owned; install apply still CLI-driven.
 5. **Plan/Apply consolidation** — (done) the pure `Plan` step (resolve + render + validate) lives in `pandemic_common`, shared by CLI + REST; the privileged `Apply` step runs in the agent; one code path for every surface.
-6. **Deployment UX** — (REST done) `/api/admin/deployments*` + `POST` install (name/path + `vars` + `dry_run`); (open) console Deployments tab, capability-gated on a new `deployment` token.
+6. **Deployment UX** — (done) `/api/admin/deployments*` + `POST` install (name/path + `vars` + `dry_run`); console Deployments tab: two-step install (preview the rendered plan via `dry_run: true`, then apply the identical payload with `dry_run: false`), list, status, remove; capability-gated on the agent's `deployment_lifecycle` capability. The browser never shows variable *values* or rendered file contents — only names, target paths, and modes.
 7. **Registry** — (done) spec + deployment atoms in the registry index (checksummed bundles, relative `bundle_url`); client-side `source` name resolution (`pandemic_common::resolve`); `registry find` (client-side, mirrored at `GET /api/admin/registry/find`); `--registry-url` / `PANDEMIC_REGISTRY_URL` steer both index and bundles (see Security).
-8. **Hardening** — dry-run diffs, checksums, audit log of applied steps, best-effort rollback; **revisit agent-side registry resolution (option b) now that checksums exist.**
+8. **Hardening** — dry-run diffs, checksums, audit log of applied steps, best-effort rollback; **revisit agent-side registry resolution (option b) now that checksums exist.** Also: strip variable *values* and rendered file contents from the dry-run wire response (the console masks them today; the API still returns them), and decide removal policy for users/groups an infection created (currently left in place — possibly shared — but only tracked in state when created by the *final* successful apply).
 
 ## Open Questions
 
