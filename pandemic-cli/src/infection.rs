@@ -17,7 +17,8 @@ use anyhow::{bail, Context, Result};
 use pandemic_protocol::spec::{parse_infection_spec, InfectionSpec};
 use pandemic_protocol::AgentRequest;
 
-use crate::apply::{build_plan_from_spec, parse_set_args};
+use crate::apply::{build_plan_from_spec, parse_set_args, parse_set_values, resolve_infection_target};
+use crate::registry::registry_client;
 use crate::service::agent_action;
 
 pub async fn handle_infection_command(
@@ -26,9 +27,11 @@ pub async fn handle_infection_command(
     agent_secret_path: Option<PathBuf>,
 ) -> Result<()> {
     match action {
-        crate::InfectionAction::Install { path, set } => {
-            install(&path, &set, agent_secret, agent_secret_path).await
-        }
+        crate::InfectionAction::Install {
+            target,
+            set,
+            registry_url,
+        } => install(&target, &set, registry_url, agent_secret, agent_secret_path).await,
         crate::InfectionAction::Status { name } => {
             status(name.as_deref(), agent_secret, agent_secret_path).await
         }
@@ -39,25 +42,35 @@ pub async fn handle_infection_command(
 }
 
 async fn install(
-    spec_path: &Path,
+    target: &str,
     set_args: &[String],
+    registry_url: Option<String>,
     agent_secret: Option<String>,
     agent_secret_path: Option<PathBuf>,
 ) -> Result<()> {
-    let text = std::fs::read_to_string(spec_path)
-        .with_context(|| format!("reading infection spec {}", spec_path.display()))?;
-    let spec: InfectionSpec = parse_infection_spec(&text)
-        .with_context(|| format!("parsing infection spec {}", spec_path.display()))?;
+    // Plan step. A local spec path stays fully offline; a registry name fetches
+    // + sha256-verifies + extracts the bundle, then builds the identical plan.
+    let plan = if target_is_local(target) {
+        let spec_path = Path::new(target);
+        let text = std::fs::read_to_string(spec_path)
+            .with_context(|| format!("reading infection spec {}", spec_path.display()))?;
+        let spec: InfectionSpec = parse_infection_spec(&text)
+            .with_context(|| format!("parsing infection spec {}", spec_path.display()))?;
 
-    let declared: Vec<String> = spec.variables.keys().cloned().collect();
-    let set = parse_set_args(
-        set_args,
-        &declared,
-        &format!("infection '{}'", spec.meta.name),
-    )?;
-
-    // Resolve + render everything (pure, local). The agent runs the Apply step.
-    let plan = build_plan_from_spec(spec_path, &set)?;
+        let declared: Vec<String> = spec.variables.keys().cloned().collect();
+        let set = parse_set_args(
+            set_args,
+            &declared,
+            &format!("infection '{}'", spec.meta.name),
+        )?;
+        build_plan_from_spec(spec_path, &set)?
+    } else {
+        // Registry name: --set values parsed raw, then validated against the
+        // bundle's declared variables inside the resolver.
+        let set = parse_set_values(set_args)?;
+        let client = registry_client(registry_url);
+        resolve_infection_target(&client, target, &set).await?
+    };
 
     // Ownership guard: never install over an infection a deployment owns.
     let existing = agent_action(
@@ -170,6 +183,13 @@ async fn list(agent_secret: Option<String>, agent_secret_path: Option<PathBuf>) 
         );
     }
     Ok(())
+}
+
+/// A target that contains a path separator, or that resolves to an existing
+/// local path, is treated as a local spec (offline). A bare name with no local
+/// file by that name is a registry atom name (fetched + verified).
+pub(crate) fn target_is_local(target: &str) -> bool {
+    target.contains('/') || Path::new(target).exists()
 }
 
 pub(crate) fn active_str(value: Option<&serde_json::Value>) -> String {

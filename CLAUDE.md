@@ -116,7 +116,7 @@ Messages are line-delimited JSON. The daemon uses `serde_json` with `#[serde(tag
 
 **Request types**: `Register`, `Deregister`, `ListPlugins`, `GetPlugin`, `Subscribe`, `Unsubscribe`, `Publish`, `GetHealth`
 
-**AgentRequest types**: `GetHealth`, `GetCapabilities`, `ListServices`, `SystemdControl` (start/stop/restart/enable/disable/status/daemon-reload), `UserCreate/Delete/Modify`, `ListUsers`, `GroupCreate/Delete/AddUser/RemoveUser`, `ListGroups`, `ServiceConfigOverride/Reset`, `GetServiceConfig`, `SearchInfections`, `GetInfectionManifest`, `InstallInfection`, `AttachInfection`/`DetachInfection`, `PackageInstall`, `WriteFile`, `RecordInfection`, `ListInfections`, `GetInfectionStatus`, `UninstallInfection`, `RecordDeployment`, `ListDeployments`, `GetDeploymentStatus`, `RemoveDeployment`
+**AgentRequest types**: `GetHealth`, `GetCapabilities`, `ListServices`, `SystemdControl` (start/stop/restart/enable/disable/status/daemon-reload), `UserCreate/Delete/Modify`, `ListUsers`, `GroupCreate/Delete/AddUser/RemoveUser`, `ListGroups`, `ServiceConfigOverride/Reset`, `GetServiceConfig`, `GetInfectionManifest`, `InstallInfection`, `AttachInfection`/`DetachInfection`, `PackageInstall`, `WriteFile`, `RecordInfection`, `ListInfections`, `GetInfectionStatus`, `UninstallInfection`, `RecordDeployment`, `ListDeployments`, `GetDeploymentStatus`, `RemoveDeployment`
 
 **Response types**: `Success { data }`, `Error { message }`, `NotFound { message }`
 

@@ -167,17 +167,6 @@ pub async fn handle_agent_request(request: AgentRequest) -> Response {
             }
         }
 
-        AgentRequest::SearchInfections { query } => {
-            info!("Searching infections: {}", query);
-            let client = RegistryClient::new();
-            match client.search_infections(&query).await {
-                Ok(results) => Response::success_with_data(serde_json::json!({
-                    "infections": results
-                })),
-                Err(e) => Response::error(format!("Failed to search infections: {}", e)),
-            }
-        }
-
         AgentRequest::GetInfectionManifest { name } => {
             info!("Getting infection manifest: {}", name);
             let client = RegistryClient::new();

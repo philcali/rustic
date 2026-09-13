@@ -179,9 +179,13 @@ pandemic-cli deployment list
 pandemic-cli deployment status [name]
 pandemic-cli deployment remove <name>
 
-pandemic-cli infection install <path> [--set k=v ...]
+pandemic-cli infection install <path|name> [--set k=v ...] [--registry-url URL]
 pandemic-cli infection status [name]
 pandemic-cli infection uninstall <name>
+
+pandemic-cli registry find <query> [--registry-url URL]
+pandemic-cli registry get <name> [--registry-url URL]
+pandemic-cli registry install <name> [--registry-url URL]
 ```
 
 `--dry-run` resolves, renders, and prints the full plan — packages, files with diffs against what's on disk, user and unit actions — without applying. This is the "plan" view: the review moment before root does anything.
@@ -213,15 +217,15 @@ Both layers are distributable. Infection specs are the publishable atom; a deplo
 
 ## Implementation Plan
 
-Phases 1–4 are done (CLI-driven). The pivot: the install apply-loop currently lives in the CLI binary, while removal / state / status already live in the agent — consolidate install into the agent so every surface is a passthrough.
+Phases 1–5 are done: the pure `Plan` step (resolve + render + validate) is consolidated in `pandemic_common`, shared by the CLI and REST, while the privileged `Apply` step runs in the agent — one code path for every surface. 6 and 7 are largely in; the console Deployments tab (6) and Hardening (8) remain.
 
 1. **Schema & render** — (done) `InfectionSpec` / `DeploymentSpec` in `pandemic-protocol`; TOML parsing, variable resolution, validation (shared `pandemic-protocol::spec`).
 2. **Agent primitives** — (done) `PackageInstall`, `WriteFile` handlers; package-manager detection via `GetCapabilities`.
 3. **Infection apply** — (done) `infection install/status/uninstall` + state dir. Standalone path works end-to-end (agent-owned state; install apply still CLI-driven).
 4. **Deployment apply** — (done) `deployment install/list/status/remove`, ownership, reverse-order removal, re-apply/upgrade. Removal + state agent-owned; install apply still CLI-driven.
-5. **Plan/Apply consolidation** — move the install apply-loop into the agent as `Plan*` (pure) / `Apply*` (privileged); CLI becomes a passthrough; install / removal / state all agent-owned and symmetric.
-6. **Deployment UX** — REST `/api/admin/deployments*` + console Deployments tab, capability-gated on a new `deployment` token.
-7. **Registry** — spec and deployment manifests in the registry index; `source` name resolution (client-side; see Security).
+5. **Plan/Apply consolidation** — (done) the pure `Plan` step (resolve + render + validate) lives in `pandemic_common`, shared by CLI + REST; the privileged `Apply` step runs in the agent; one code path for every surface.
+6. **Deployment UX** — (REST done) `/api/admin/deployments*` + `POST` install (name/path + `vars` + `dry_run`); (open) console Deployments tab, capability-gated on a new `deployment` token.
+7. **Registry** — (done) spec + deployment atoms in the registry index (checksummed bundles, relative `bundle_url`); client-side `source` name resolution (`pandemic_common::resolve`); `registry find` (client-side, mirrored at `GET /api/admin/registry/find`); `--registry-url` / `PANDEMIC_REGISTRY_URL` steer both index and bundles (see Security).
 8. **Hardening** — dry-run diffs, checksums, audit log of applied steps, best-effort rollback; **revisit agent-side registry resolution (option b) now that checksums exist.**
 
 ## Open Questions

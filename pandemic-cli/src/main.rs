@@ -77,10 +77,13 @@ enum Commands {
 
 #[derive(Subcommand)]
 pub enum InfectionAction {
-    /// Install an infection from a spec file
+    /// Install an infection from a spec file or a registry name
     Install {
-        /// Path to the infection spec (spec.toml)
-        path: PathBuf,
+        /// Path to the infection spec (spec.toml), or a registry infection-spec name
+        target: String,
+        /// Registry URL to use (when installing by name)
+        #[arg(long)]
+        registry_url: Option<String>,
         /// Variable values: --set key=value (repeatable)
         #[arg(long = "set")]
         set: Vec<String>,
@@ -101,8 +104,11 @@ pub enum InfectionAction {
 pub enum DeploymentAction {
     /// Render and apply a deployment spec (installs its infections in order)
     Install {
-        /// Path to the deployment spec (deployment.toml)
-        path: PathBuf,
+        /// Path to the deployment spec (deployment.toml), or a registry deployment name
+        target: String,
+        /// Registry URL to use (when installing by name)
+        #[arg(long)]
+        registry_url: Option<String>,
         /// Shared variable values: --set key=value (repeatable)
         #[arg(long = "set")]
         set: Vec<String>,
@@ -126,8 +132,8 @@ pub enum DeploymentAction {
 
 #[derive(Subcommand)]
 enum RegistryAction {
-    /// Search for infections in the registry
-    Search {
+    /// Find infections (and other registry atoms) by name or description
+    Find {
         /// Search query
         query: String,
         /// Registry URL to use

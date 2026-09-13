@@ -144,9 +144,6 @@ pub enum AgentRequest {
     },
 
     // Registry operations
-    SearchInfections {
-        query: String,
-    },
     GetInfectionManifest {
         name: String,
     },

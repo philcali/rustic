@@ -5,7 +5,7 @@ use axum::{
     response::Json,
     Extension,
 };
-use pandemic_common::{AgentClient, AgentStatus, DaemonClient};
+use pandemic_common::{AgentClient, AgentStatus, DaemonClient, RegistryClient};
 use pandemic_protocol::{
     AgentRequest, Request, Response as PandemicResponse, ServiceOverrides, UserConfig,
 };
@@ -363,7 +363,12 @@ pub async fn reset_service_config(
     format_pandemic_response(response.await)
 }
 // Registry handlers
-pub async fn search_infections(
+//
+// `find` is a pure, read-only search and is consistent with the CLI
+// (`pandemic-cli registry find`): it resolves client-side against the registry
+// directly rather than round-tripping through the agent, which adds no value
+// for a lookup. `?registry_url=` mirrors the CLI `--registry-url` flag.
+pub async fn find_infections(
     State(state): State<AppState>,
     Query(params): Query<HashMap<String, String>>,
     Extension(scopes): Extension<Vec<String>>,
@@ -371,10 +376,19 @@ pub async fn search_infections(
     require_scope!(&state.auth_config, &scopes, "admin");
 
     let query = params.get("q").unwrap_or(&String::new()).clone();
-    let request = AgentRequest::SearchInfections { query };
-    let agent_client = AgentClient::new().with_secret(&state.agent_secret);
-    let response = agent_client.send_agent_request(&request);
-    format_pandemic_response(response.await)
+    let client = match params.get("registry_url") {
+        Some(url) => RegistryClient::with_registry_url(url.clone()),
+        None => RegistryClient::new(),
+    };
+    // `search_infections` swallows fetch errors and returns an empty list when
+    // the registry is unreachable, so this stays a 200 (possibly-empty) result.
+    let infections = client.search_infections(&query).await.unwrap_or_default();
+    Ok(Json(json!({
+        "status": "success",
+        "data": {
+            "infections": infections
+        }
+    })))
 }
 
 pub async fn get_infection_manifest(
@@ -458,11 +472,20 @@ pub async fn remove_deployment(
 
 #[derive(Deserialize)]
 pub struct DeploymentInstallPayload {
-    /// Path to the deployment spec (`pandemic-full.toml`).
-    path: String,
+    /// Registry deployment name (by-name install; its infection-spec atoms are
+    /// pulled from the same registry). Mutually exclusive with `path`.
+    #[serde(default)]
+    name: Option<String>,
+    /// Path to a local deployment spec (`deployment.toml`). Mutually exclusive
+    /// with `name`.
+    #[serde(default)]
+    path: Option<String>,
     /// Variable overrides (like the CLI `--set`); defaults to the spec's.
     #[serde(default)]
     vars: BTreeMap<String, String>,
+    /// Registry URL to use for a by-name install (overrides the default).
+    #[serde(default)]
+    registry_url: Option<String>,
     /// When true, return the resolved + rendered plan without applying.
     #[serde(default)]
     dry_run: bool,
@@ -470,9 +493,11 @@ pub struct DeploymentInstallPayload {
 
 /// `POST /api/admin/deployments` — the Plan/Apply consolidation.
 ///
-/// Builds the concrete deployment plan (resolve + render + validate), then
-/// either returns it (dry-run) or hands the concrete plans to the agent to
-/// apply: ownership pre-flight, each infection in `order`, then the record.
+/// Builds the concrete deployment plan (resolve + render + validate) from
+/// either a registry `name` (fetch + sha256-verify + extract) or a local spec
+/// `path` (offline), then either returns it (dry-run) or hands the concrete
+/// plans to the agent to apply: ownership pre-flight, each infection in
+/// `order`, then the record.
 pub async fn install_deployment(
     State(state): State<AppState>,
     Extension(scopes): Extension<Vec<String>>,
@@ -480,10 +505,26 @@ pub async fn install_deployment(
 ) -> ApiResult {
     require_scope!(&state.auth_config, &scopes, "admin");
 
-    let dp = match pandemic_common::build_deployment_plan(
-        std::path::Path::new(&payload.path),
-        &payload.vars,
+    let build: anyhow::Result<pandemic_common::DeploymentPlan> = match (
+        payload.name,
+        payload.path,
     ) {
+        (Some(name), _) => {
+            let client = match payload.registry_url {
+                Some(url) => pandemic_common::RegistryClient::with_registry_url(url),
+                None => pandemic_common::RegistryClient::new(),
+            };
+            pandemic_common::resolve_deployment_target(&client, &name, &payload.vars).await
+        }
+        (None, Some(path)) => {
+            pandemic_common::build_deployment_plan(std::path::Path::new(&path), &payload.vars)
+        }
+        (None, None) => Err(anyhow::anyhow!(
+            "provide either a registry 'name' or a local spec 'path'"
+        )),
+    };
+
+    let dp = match build {
         Ok(dp) => dp,
         Err(e) => {
             return Err((

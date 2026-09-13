@@ -11,8 +11,10 @@
 //! are left untouched. Re-running `deployment install` under an existing name
 //! is an idempotent re-apply/upgrade.
 //!
-//! Registry `source` names and `--registry-url` arrive with phase 5 —
-//! `source` must be a local path for now.
+//! The install target is either a local `deployment.toml` path (fully offline)
+//! or a registry **deployment** name (fetched + sha256-verified, its infection-spec
+//! atoms pulled from the same registry). `--registry-url` overrides the registry
+//! for the by-name path.
 
 use std::path::{Path, PathBuf};
 
@@ -21,9 +23,11 @@ use pandemic_protocol::spec::parse_deployment_spec;
 use pandemic_protocol::AgentRequest;
 
 use crate::apply::{
-    build_deployment_plan_from, deployment_apply_infections, parse_set_args, DeploymentPlan,
+    build_deployment_plan_from, deployment_apply_infections, parse_set_args, parse_set_values,
+    resolve_deployment_target, DeploymentPlan,
 };
-use crate::infection::active_str;
+use crate::infection::{active_str, target_is_local};
+use crate::registry::registry_client;
 use crate::service::agent_action;
 
 pub async fn handle_deployment_command(
@@ -32,9 +36,12 @@ pub async fn handle_deployment_command(
     agent_secret_path: Option<PathBuf>,
 ) -> Result<()> {
     match action {
-        crate::DeploymentAction::Install { path, set, dry_run } => {
-            install(&path, &set, dry_run, agent_secret, agent_secret_path).await
-        }
+        crate::DeploymentAction::Install {
+            target,
+            set,
+            registry_url,
+            dry_run,
+        } => install(&target, &set, registry_url, dry_run, agent_secret, agent_secret_path).await,
         crate::DeploymentAction::List => list(agent_secret, agent_secret_path).await,
         crate::DeploymentAction::Status { name } => {
             status(name.as_deref(), agent_secret, agent_secret_path).await
@@ -46,31 +53,42 @@ pub async fn handle_deployment_command(
 }
 
 async fn install(
-    spec_path: &Path,
+    target: &str,
     set_args: &[String],
+    registry_url: Option<String>,
     dry_run: bool,
     agent_secret: Option<String>,
     agent_secret_path: Option<PathBuf>,
 ) -> Result<()> {
-    let text = std::fs::read_to_string(spec_path)
-        .with_context(|| format!("reading deployment spec {}", spec_path.display()))?;
-    let spec = parse_deployment_spec(&text)
-        .with_context(|| format!("parsing deployment spec {}", spec_path.display()))?;
-    let spec_dir = spec_path
-        .parent()
-        .map(Path::to_path_buf)
-        .filter(|p| p != Path::new(""))
-        .unwrap_or_else(|| PathBuf::from("."));
+    // Pure Plan step (shared with the REST API). A local spec path stays fully
+    // offline; a registry name fetches + sha256-verifies the deployment bundle
+    // and its infection-spec atoms, then resolves + renders + validates them.
+    let dp = if target_is_local(target) {
+        let spec_path = Path::new(target);
+        let text = std::fs::read_to_string(spec_path)
+            .with_context(|| format!("reading deployment spec {}", spec_path.display()))?;
+        let spec = parse_deployment_spec(&text)
+            .with_context(|| format!("parsing deployment spec {}", spec_path.display()))?;
+        let spec_dir = spec_path
+            .parent()
+            .map(Path::to_path_buf)
+            .filter(|p| p != Path::new(""))
+            .unwrap_or_else(|| PathBuf::from("."));
 
-    let declared: Vec<String> = spec.variables.keys().cloned().collect();
-    let set = parse_set_args(
-        set_args,
-        &declared,
-        &format!("deployment '{}'", spec.meta.name),
-    )?;
-
-    // Pure Plan step (shared with the REST API): resolve + render + validate.
-    let dp = build_deployment_plan_from(&spec, &spec_dir, &set)?;
+        let declared: Vec<String> = spec.variables.keys().cloned().collect();
+        let set = parse_set_args(
+            set_args,
+            &declared,
+            &format!("deployment '{}'", spec.meta.name),
+        )?;
+        build_deployment_plan_from(&spec, &spec_dir, &set)?
+    } else {
+        // Registry name: --set values parsed raw, then validated against the
+        // deployment bundle's declared variables inside the resolver.
+        let set = parse_set_values(set_args)?;
+        let client = registry_client(registry_url);
+        resolve_deployment_target(&client, target, &set).await?
+    };
 
     if dry_run {
         print_dry_run(&dp);

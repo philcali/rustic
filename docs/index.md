@@ -51,7 +51,7 @@ You can explore the registry online at the following URL:
 - [Pandemic Registry](https://philcali.github.io/rustic/registry/index.json)
 
 ```
-pandemic-cli registry search "pandemic"
+pandemic-cli registry find "pandemic"
 Found 8 infection(s):
 
 📦 pandemic-cli

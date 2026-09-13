@@ -8,5 +8,6 @@
 
 pub use pandemic_common::apply::{
     build_deployment_plan_from, build_plan_from_spec, deployment_apply_infections, parse_set_args,
-    DeploymentPlan,
+    parse_set_values, DeploymentPlan,
 };
+pub use pandemic_common::resolve::{resolve_deployment_target, resolve_infection_target};

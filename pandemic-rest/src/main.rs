@@ -23,11 +23,12 @@ use auth::AuthConfig;
 use events::publish_event;
 use handlers::{
     add_user_to_group, control_system_service, create_group, create_user, delete_group,
-    delete_user, deregister_plugin, get_admin_capabilities, get_deployment, get_health,
+    delete_user, deregister_plugin, find_infections, get_admin_capabilities, get_deployment,
+    get_health,
     get_infection_manifest, get_plugin, get_service_config, get_system_service, install_deployment,
     install_infection, list_deployments, list_groups, list_plugins, list_system_services,
     list_users, modify_user, remove_deployment, remove_user_from_group, reset_service_config,
-    search_infections, set_service_config, AppState,
+    set_service_config, AppState,
 };
 use middleware::auth_middleware;
 use std::sync::{Arc, Mutex};
@@ -155,7 +156,7 @@ async fn main() -> Result<()> {
                 .delete(reset_service_config),
         )
         // Admin registry routes
-        .route("/api/admin/registry/search", get(search_infections))
+        .route("/api/admin/registry/find", get(find_infections))
         .route(
             "/api/admin/registry/infections/:name",
             get(get_infection_manifest),
