@@ -487,7 +487,9 @@ pub struct DeploymentInstallPayload {
     /// Registry URL to use for a by-name install (overrides the default).
     #[serde(default)]
     registry_url: Option<String>,
-    /// When true, return the resolved + rendered plan without applying.
+    /// When true, return the resolved plan without applying — redacted:
+    /// names, targets, owners, modes, content hashes; never values, file
+    /// contents, or the health command.
     #[serde(default)]
     dry_run: bool,
 }
@@ -506,10 +508,8 @@ pub async fn install_deployment(
 ) -> ApiResult {
     require_scope!(&state.auth_config, &scopes, "admin");
 
-    let build: anyhow::Result<pandemic_common::DeploymentPlan> = match (
-        payload.name,
-        payload.path,
-    ) {
+    let build: anyhow::Result<pandemic_common::DeploymentPlan> = match (payload.name, payload.path)
+    {
         (Some(name), _) => {
             let client = match payload.registry_url {
                 Some(url) => pandemic_common::RegistryClient::with_registry_url(url),
@@ -535,28 +535,13 @@ pub async fn install_deployment(
         }
     };
 
+    // Dry-run: return the *redacted* plan (phase 8). Variable values,
+    // rendered file/unit contents, and the health-check command never leave
+    // the host — only names, targets, owners, modes, and content hashes.
     if payload.dry_run {
-        let infections = dp
-            .infections
-            .iter()
-            .map(|r| {
-                json!({
-                    "name": r.name,
-                    "order": r.order,
-                    "source": r.source,
-                    "version": r.plan.version,
-                    "plan": r.plan,
-                })
-            })
-            .collect::<Vec<_>>();
         return Ok(Json(json!({
             "status": "success",
-            "data": {
-                "name": dp.spec.meta.name,
-                "version": dp.spec.meta.version,
-                "shared_variables": dp.shared,
-                "infections": infections,
-            }
+            "data": pandemic_common::deployment_preview_data(&dp),
         })));
     }
 

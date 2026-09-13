@@ -270,13 +270,30 @@ pub async fn uninstall_infection(name: &str) -> Result<serde_json::Value> {
 /// Users and groups it created are left in place — they may be shared — and
 /// reported in `notes`.
 pub async fn uninstall_infection_in(root: &str, name: &str) -> Result<serde_json::Value> {
+    uninstall_infection_in_impl(root, name, false).await
+}
+
+/// As [`uninstall_infection_in`], but without the "owned by deployment —
+/// consider `deployment remove`" note: used by `RemoveDeployment`, whose
+/// caller *is* the owner, so the hint is noise there.
+pub async fn uninstall_owned_infection_in(root: &str, name: &str) -> Result<serde_json::Value> {
+    uninstall_infection_in_impl(root, name, true).await
+}
+
+async fn uninstall_infection_in_impl(
+    root: &str,
+    name: &str,
+    suppress_owner_note: bool,
+) -> Result<serde_json::Value> {
     let state = load_state_in(root, name)?;
     let mut notes = Vec::new();
 
-    if let Some(owner) = &state.owner {
-        notes.push(format!(
-            "'{name}' is owned by deployment '{owner}' — consider `pandemic-cli deployment remove {owner}` instead"
-        ));
+    if !suppress_owner_note {
+        if let Some(owner) = &state.owner {
+            notes.push(format!(
+                "'{name}' is owned by deployment '{owner}' — consider `pandemic-cli deployment remove {owner}` instead"
+            ));
+        }
     }
 
     if state.attach.is_some() {
@@ -537,6 +554,41 @@ health_interval = 45
         let root = temp_root("uninstall-unknown");
         let err = uninstall_infection_in(&root, "ghost").await.unwrap_err();
         assert!(err.to_string().contains("not installed"));
+        cleanup(&root);
+    }
+
+    #[tokio::test]
+    async fn owned_uninstall_suppresses_owner_hint() {
+        let root = temp_root("owned-hint");
+        let mut state = sample_state("rest");
+        state.owner = Some("rest-mqtt".to_string());
+        record_infection_in(&root, "rest", &state).unwrap();
+
+        // The owning deployment removes it: the "consider `deployment remove`"
+        // hint is noise (the caller *is* that deployment) and must not show.
+        let owned: serde_json::Value = uninstall_owned_infection_in(&root, "rest").await.unwrap();
+        let owned_notes = owned["notes"].as_array().unwrap();
+        assert!(
+            !owned_notes
+                .iter()
+                .any(|n| n.as_str().unwrap_or("").contains("consider")),
+            "owner hint must be suppressed for the owning deployment: {owned_notes:?}"
+        );
+
+        // A standalone uninstall still gets the hint.
+        let mut web = sample_state("web");
+        web.owner = Some("other-deployment".to_string());
+        record_infection_in(&root, "web", &web).unwrap();
+        let standalone: serde_json::Value = uninstall_infection_in(&root, "web").await.unwrap();
+        let standalone_notes = standalone["notes"].as_array().unwrap();
+        assert!(
+            standalone_notes.iter().any(|n| {
+                n.as_str()
+                    .unwrap_or("")
+                    .contains("consider `pandemic-cli deployment remove other-deployment`")
+            }),
+            "owner hint must remain for standalone uninstalls: {standalone_notes:?}"
+        );
         cleanup(&root);
     }
 }

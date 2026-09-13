@@ -18,7 +18,7 @@ use chrono::Utc;
 use pandemic_protocol::spec::DeploymentState;
 
 use crate::infection::{validate_infection_name, INFECTIONS_DIR};
-use crate::state::{infection_status_in, is_installed_in, uninstall_infection_in};
+use crate::state::{infection_status_in, is_installed_in, uninstall_owned_infection_in};
 
 /// Where deployment records live on the host.
 pub const DEPLOYMENTS_DIR: &str = "/etc/pandemic/deployments";
@@ -207,23 +207,24 @@ pub async fn remove_deployment_in(
         };
 
         match inf_state.owner.as_deref() {
-            Some(owner) if owner == name => match uninstall_infection_in(inf_root, &inf.name).await
-            {
-                Ok(result) => {
-                    removed.push(inf.name.clone());
-                    if let Some(inf_notes) = result.get("notes").and_then(|v| v.as_array()) {
-                        for n in inf_notes {
-                            if let Some(n) = n.as_str() {
-                                notes.push(format!("{}: {n}", inf.name));
+            Some(owner) if owner == name => {
+                match uninstall_owned_infection_in(inf_root, &inf.name).await {
+                    Ok(result) => {
+                        removed.push(inf.name.clone());
+                        if let Some(inf_notes) = result.get("notes").and_then(|v| v.as_array()) {
+                            for n in inf_notes {
+                                if let Some(n) = n.as_str() {
+                                    notes.push(format!("{}: {n}", inf.name));
+                                }
                             }
                         }
                     }
+                    Err(e) => {
+                        failed.push(inf.name.clone());
+                        notes.push(format!("'{}': uninstall failed: {e}", inf.name));
+                    }
                 }
-                Err(e) => {
-                    failed.push(inf.name.clone());
-                    notes.push(format!("'{}': uninstall failed: {e}", inf.name));
-                }
-            },
+            }
             Some(owner) => {
                 skipped.push(inf.name.clone());
                 notes.push(format!(

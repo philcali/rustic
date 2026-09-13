@@ -16,7 +16,10 @@ use pandemic_protocol::spec::{
     render_template, resolve_deployment_variables, resolve_infection, validate_deployment,
     DeploymentSpec, InfectionSpec,
 };
-use pandemic_protocol::{ApplyDeploymentInfection, Plan, PlanUnit, RenderedFile, UserConfig};
+use pandemic_protocol::{
+    ApplyDeploymentInfection, Plan, PlanPreview, PlanUnit, PreviewFile, PreviewHealth, PreviewUnit,
+    RenderedFile, UserConfig,
+};
 use sha2::{Digest, Sha256};
 
 /// Parse `--set key=value` pairs into a map, validating each key is a valid
@@ -269,6 +272,66 @@ pub fn deployment_apply_infections(dp: &DeploymentPlan) -> Vec<ApplyDeploymentIn
             plan: r.plan.clone(),
         })
         .collect()
+}
+
+/// Redacted wire form of one [`Plan`] (ideas/deployments.md, phase 8).
+///
+/// Keeps what a reviewer needs — names, targets, owners, modes, content
+/// hashes, packages, groups, user *names*, variable *names*, the health
+/// interval — and drops the secret parts: variable values, file/unit
+/// contents, and the health-check command.
+pub fn plan_preview(plan: &Plan) -> PlanPreview {
+    PlanPreview {
+        name: plan.name.clone(),
+        version: plan.version.clone(),
+        description: plan.description.clone(),
+        files: plan
+            .files
+            .iter()
+            .map(|f| PreviewFile {
+                target: f.target.clone(),
+                owner: f.owner.clone(),
+                mode: f.mode.clone(),
+                sha256: sha256_hex(&f.content),
+            })
+            .collect(),
+        unit: plan.unit.as_ref().map(|u| PreviewUnit {
+            name: u.name.clone(),
+            target: u.target.clone(),
+            enable: u.enable,
+            sha256: sha256_hex(&u.content),
+        }),
+        attach: plan.attach.clone(),
+        health: PreviewHealth {
+            configured: !plan.health_check.is_empty(),
+            interval: plan.health_interval,
+        },
+        declared_packages: plan.declared_packages.clone(),
+        groups: plan.groups.clone(),
+        users: plan.users.iter().map(|(name, _)| name.clone()).collect(),
+        variable_names: plan.variables.keys().cloned().collect(),
+    }
+}
+
+/// The dry-run wire payload for a resolved [`DeploymentPlan`] (phase 8):
+/// the deployment's identity, its shared variable *names*, and each
+/// infection's redacted [`plan_preview`] — never values, contents, or the
+/// health command.
+pub fn deployment_preview_data(dp: &DeploymentPlan) -> serde_json::Value {
+    serde_json::json!({
+        "name": dp.spec.meta.name,
+        "version": dp.spec.meta.version,
+        "shared_variable_names": dp.shared.keys().cloned().collect::<Vec<_>>(),
+        "infections": dp.infections.iter().map(|r| {
+            serde_json::json!({
+                "name": r.name,
+                "order": r.order,
+                "source": r.source,
+                "version": r.plan.version,
+                "preview": plan_preview(&r.plan),
+            })
+        }).collect::<Vec<_>>(),
+    })
 }
 
 /// Resolve a deployment `source` to a local infection spec file.

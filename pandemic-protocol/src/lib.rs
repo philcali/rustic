@@ -331,6 +331,65 @@ pub struct ApplyDeploymentInfection {
     pub plan: Plan,
 }
 
+// ---------------------------------------------------------------------------
+// Dry-run previews (ideas/deployments.md, phase 8 — wire masking).
+//
+// The concrete [`Plan`] carries rendered contents, variable values, and the
+// health-check command — fine between CLI and agent (both trusted, host
+// local), but never sent to a browser: values may be secrets and the state
+// record is 0600 root-only. The `Preview*` types are the redacted wire form
+// a reviewer needs: names, targets, owners, modes, content hashes.
+// ---------------------------------------------------------------------------
+
+/// One rendered file, redacted: placement + content hash, never the content.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PreviewFile {
+    pub target: String,
+    pub owner: String,
+    pub mode: String,
+    /// sha256 of the rendered content — verifiable without revealing it.
+    pub sha256: String,
+}
+
+/// The owned unit, redacted: identity + enablement, never the content.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PreviewUnit {
+    pub name: String,
+    pub target: String,
+    pub enable: bool,
+    /// sha256 of the rendered unit content.
+    pub sha256: String,
+}
+
+/// The health check, redacted: whether one is configured and how often it
+/// runs — never the command (it may carry credentials).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PreviewHealth {
+    pub configured: bool,
+    pub interval: u64,
+}
+
+/// The redacted wire form of a [`Plan`]: everything a reviewer needs to
+/// approve an install (names, target paths, owners, modes, hashes, packages,
+/// groups, user names, variable names, health interval) without the secret
+/// parts (variable values, file/unit contents, the health command).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlanPreview {
+    pub name: String,
+    pub version: String,
+    pub description: String,
+    pub files: Vec<PreviewFile>,
+    pub unit: Option<PreviewUnit>,
+    pub attach: Option<String>,
+    pub health: PreviewHealth,
+    pub declared_packages: BTreeMap<String, Vec<String>>,
+    pub groups: Vec<String>,
+    /// User names only (no config).
+    pub users: Vec<String>,
+    /// Variable names only (never values).
+    pub variable_names: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServiceOverrides {
     pub environment: Option<HashMap<String, String>>,
@@ -776,5 +835,45 @@ mod tests {
             diff.as_secs() <= 1,
             "Timestamp mismatch: original={original_time}, deserialized={deserialized_time}"
         );
+    }
+
+    #[test]
+    fn test_plan_preview_serialization_roundtrip() {
+        let preview = PlanPreview {
+            name: "rest".to_string(),
+            version: "1.2.3".to_string(),
+            description: "REST API".to_string(),
+            files: vec![PreviewFile {
+                target: "/etc/pandemic/rest/rest-auth.toml".to_string(),
+                owner: "pandemic".to_string(),
+                mode: "0600".to_string(),
+                sha256: "a".repeat(64),
+            }],
+            unit: Some(PreviewUnit {
+                name: "pandemic-rest".to_string(),
+                target: "/etc/systemd/system/pandemic-rest.service".to_string(),
+                enable: true,
+                sha256: "b".repeat(64),
+            }),
+            attach: None,
+            health: PreviewHealth {
+                configured: true,
+                interval: 30,
+            },
+            declared_packages: BTreeMap::from([("apt".to_string(), vec!["curl".to_string()])]),
+            groups: vec!["pandemic".to_string()],
+            users: vec!["pandemic".to_string()],
+            variable_names: vec!["api_key".to_string(), "listen_port".to_string()],
+        };
+
+        let json = serde_json::to_string(&preview).unwrap();
+        let back: PlanPreview = serde_json::from_str(&json).unwrap();
+        assert_eq!(json, serde_json::to_string(&back).unwrap());
+        assert_eq!(back.users, vec!["pandemic".to_string()]);
+        assert_eq!(
+            back.variable_names,
+            vec!["api_key".to_string(), "listen_port".to_string()]
+        );
+        assert_eq!(back.files[0].sha256, "a".repeat(64));
     }
 }

@@ -6,9 +6,10 @@
  * identical payload is sent with `dry_run: false`. Mirrors the CLI
  * `pandemic-cli deployment ...` surface (ideas/deployments.md, phase 6).
  *
- * Variable *values* and rendered file contents are never shown in the browser
- * (values may be secrets; the state record is 0600 root-only) — only names,
- * target paths, and modes.
+ * Variable *values*, rendered file contents, and the health-check command
+ * are never shown in the browser (values may be secrets; the state record
+ * is 0600 root-only) — the API only sends names, target paths, owners,
+ * modes, and content hashes (phase 8 server-side masking).
  */
 import { apiRequest } from './api.js';
 
@@ -27,7 +28,7 @@ function variablesBlock(variables) {
     return `
         <div class="detail-block">
             <h4>Shared variables</h4>
-            <div>${names.map(n => `<span class="version">${n}</span>`).join(' ')}</div>
+            <div>${names.map(n => `<span class="version">${esc(n)}</span>`).join(' ')}</div>
         </div>`;
 }
 
@@ -321,14 +322,20 @@ export async function applyDeploymentInstall(apiBase, apiKey, reloadDeployments)
 
 // --- plan preview rendering (names/targets/modes only, never values or contents) ---
 
-function variableNamesBlock(vars) {
-    const names = Object.keys(vars || {});
-    if (names.length === 0) return '';
+function variableNamesBlock(names) {
+    const list = Array.isArray(names) ? names : Object.keys(names || {});
+    if (list.length === 0) return '';
     return `<div class="plan-row">
         <span class="plan-label">variables</span>
-        <span>${names.map(n => `<span class="version">${esc(n)}</span>`).join(' ')}
+        <span>${list.map(n => `<span class="version">${esc(n)}</span>`).join(' ')}
             <span class="muted">(values hidden)</span></span>
     </div>`;
+}
+
+/** Short content hash for display: first 12 hex chars, full hash in the tooltip. */
+function hashSpan(sha256) {
+    if (!sha256) return '';
+    return ` <span class="muted" title="sha256 ${esc(sha256)}">sha ${esc(sha256.slice(0, 12))}</span>`;
 }
 
 function planRow(label, inner) {
@@ -337,21 +344,19 @@ function planRow(label, inner) {
 }
 
 function renderPlanInfection(r) {
-    const p = r.plan || {};
+    const p = r.preview || {};
     const packages = Object.entries(p.declared_packages || {})
         .map(([mgr, list]) => `${esc(mgr)}: ${list.map(esc).join(', ')}`)
         .join(' · ');
     const files = (p.files || [])
-        .map(f => `${esc(f.target)} <span class="muted">${esc(f.owner)}:${esc(f.mode)}</span>`)
-        .join(', ');
-    const users = (p.users || [])
-        .map(u => esc(Array.isArray(u) ? u[0] : (u && u.name) || '?'))
-        .join(', ');
+        .map(f => `${esc(f.target)} <span class="muted">${esc(f.owner)}:${esc(f.mode)}</span>${hashSpan(f.sha256)}`)
+        .join('<br>');
+    const users = (p.users || []).map(u => `<span class="version">${esc(u)}</span>`).join(' ');
     const unit = p.unit
-        ? `${esc(p.unit.name)}${p.unit.enable ? ' <span class="muted">(enabled at boot)</span>' : ''}`
+        ? `${esc(p.unit.name)}${p.unit.enable ? ' <span class="muted">(enabled at boot)</span>' : ''}${hashSpan(p.unit.sha256)}`
         : '';
-    const health = (p.health_check || []).length
-        ? `every ${p.health_interval}s <span class="muted">(command hidden)</span>`
+    const health = p.health && p.health.configured
+        ? `every ${p.health.interval}s <span class="muted">(command hidden)</span>`
         : '';
     return `<div class="plan-infection">
         <div class="plan-infection-head">
@@ -359,6 +364,7 @@ function renderPlanInfection(r) {
             <span class="version">v${esc(r.version || '?')}</span>
             <span class="muted">order ${r.order} · source: ${esc(r.source)}</span>
         </div>
+        ${p.description ? `<div class="muted">${esc(p.description)}</div>` : ''}
         ${planRow('packages', packages)}
         ${planRow('files', files)}
         ${planRow('unit', unit)}
@@ -366,7 +372,7 @@ function renderPlanInfection(r) {
         ${planRow('health check', health)}
         ${planRow('groups', (p.groups || []).map(g => `<span class="version">${esc(g)}</span>`).join(' '))}
         ${planRow('users', users)}
-        ${variableNamesBlock(p.variables)}
+        ${variableNamesBlock(p.variable_names)}
     </div>`;
 }
 
@@ -378,8 +384,8 @@ function renderPlanPreview(data) {
             <span class="version">v${esc(data.version || '?')}</span>
             <span class="muted">${infections.length} infection${infections.length === 1 ? '' : 's'}, installed in order</span>
         </div>
-        ${variableNamesBlock(data.shared_variables)}
+        ${variableNamesBlock(data.shared_variable_names)}
         ${infections.map(renderPlanInfection).join('') || '<div class="empty">No infections in this deployment.</div>'}
-        <div class="muted">File contents and variable values are hidden in the preview; applying sends the fully rendered plan to the agent.</div>
+        <div class="muted">File contents, variable values, and health-check commands are hidden in the preview; applying sends the fully rendered plan to the agent.</div>
     </div>`;
 }
