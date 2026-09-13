@@ -32,8 +32,9 @@ impl AgentStatus {
         self.last_check.elapsed() > CACHE_DURATION
     }
 
-    pub async fn refresh() -> Self {
-        match AgentClient::new().ping().await {
+    /// Re-probe the agent using an already-configured (secret-bearing) client.
+    pub async fn refresh(client: &AgentClient) -> Self {
+        match client.ping().await {
             Ok(capabilities) => Self {
                 available: true,
                 capabilities,

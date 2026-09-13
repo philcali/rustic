@@ -1,4 +1,7 @@
 # Rendered by the `rest` infection.
-bind_address = "{{ bind_address }}"
-port = "{{ port }}"
-socket_path = "{{ socket_path }}"
+[identities.admin]
+api_key = "{{ api_key }}"
+roles = ["admin"]
+
+[roles.admin]
+scopes = ["admin", "health:read"]

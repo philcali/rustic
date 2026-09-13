@@ -155,7 +155,38 @@ fn get_default_blocklist() -> (HashSet<String>, HashSet<String>) {
     (users, groups)
 }
 
+/// Add `username` to every group in the config (no-op when already a member).
+fn ensure_user_groups(username: &str, config: &UserConfig) {
+    if let Some(groups) = &config.groups {
+        for group in groups {
+            let status = Command::new("usermod")
+                .arg("-a")
+                .arg("-G")
+                .arg(group)
+                .arg(username)
+                .status();
+            match status {
+                Ok(s) if !s.success() => {
+                    warn!("Failed to add user {} to group {}", username, group)
+                }
+                Err(e) => warn!("usermod for user {} failed: {}", username, e),
+                _ => {}
+            }
+        }
+    }
+}
+
 pub async fn create_user(username: &str, config: &UserConfig) -> anyhow::Result<()> {
+    // Idempotent: a retried install may find the user already created (an
+    // earlier attempt can succeed at useradd and fail on a later step).
+    // Re-assert group membership and treat it as success.
+    let user_exists =
+        Command::new("id").arg(username).status().map(|s| s.success()).unwrap_or(false);
+    if user_exists {
+        ensure_user_groups(username, config);
+        return Ok(());
+    }
+
     let mut cmd = Command::new("useradd");
 
     if let Some(shell) = &config.shell {
@@ -168,6 +199,26 @@ pub async fn create_user(username: &str, config: &UserConfig) -> anyhow::Result<
         cmd.arg("-r");
     }
 
+    // On USERGROUPS_ENAB distros (e.g. Ubuntu) `useradd` creates a private
+    // group named after the user and fails with "group <name> exists" when
+    // one is already there — infections typically create the same-named
+    // group in the preceding step. Adopt the existing group as the
+    // user's primary group instead of failing.
+    let same_name_group = config
+        .groups
+        .as_deref()
+        .map(|gs| gs.iter().any(|g| g == username))
+        .unwrap_or(false)
+        || Command::new("getent")
+            .arg("group")
+            .arg(username)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+    if same_name_group {
+        cmd.arg("-g").arg(username);
+    }
+
     cmd.arg(username);
     let output = cmd.output()?;
 
@@ -178,19 +229,7 @@ pub async fn create_user(username: &str, config: &UserConfig) -> anyhow::Result<
         ));
     }
 
-    if let Some(groups) = &config.groups {
-        for group in groups {
-            let status = Command::new("usermod")
-                .arg("-a")
-                .arg("-G")
-                .arg(group)
-                .arg(username)
-                .status()?;
-            if !status.success() {
-                warn!("Failed to add user {} to group {}", username, group);
-            }
-        }
-    }
+    ensure_user_groups(username, config);
 
     Ok(())
 }

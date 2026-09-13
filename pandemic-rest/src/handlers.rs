@@ -118,7 +118,8 @@ pub async fn get_admin_capabilities(
     };
 
     if needs_refresh {
-        let new_status = AgentStatus::refresh().await;
+        let client = AgentClient::new().with_secret(&state.agent_secret);
+        let new_status = AgentStatus::refresh(&client).await;
         let mut agent_status = state.agent_status.lock().unwrap();
         *agent_status = new_status;
     }
