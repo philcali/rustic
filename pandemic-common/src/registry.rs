@@ -1,6 +1,7 @@
-use anyhow::Result;
+use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InfectionManifest {
@@ -159,6 +160,69 @@ impl RegistryClient {
         Ok(())
     }
 
+    /// Look up a single atom (binary, infection-spec, or deployment) by name
+    /// and return the registry base URL it was found under, plus its index
+    /// summary — including the `type` discriminant, the spec-bundle URL, and
+    /// its sha256. The base URL is needed to resolve a relative `bundle_url`
+    /// against the registry that actually served the index.
+    pub async fn get_infection_summary(
+        &self,
+        name: &str,
+    ) -> Result<(String, InfectionSummary)> {
+        for registry_url in &self.registries {
+            if let Ok(index) = self.fetch_registry_index(registry_url).await {
+                if let Some(summary) = index.infections.get(name) {
+                    return Ok((registry_url.clone(), summary.clone()));
+                }
+            }
+        }
+        Err(anyhow::anyhow!(
+            "'{name}' not found in any registry (tried {})",
+            self.registries.len()
+        ))
+    }
+
+    /// Fetch an atom's spec/deployment bundle, verify its sha256, and extract
+    /// it (tar.gz) into `root`. Returns the extracted top-level directory
+    /// (`root/<name>/`).
+    ///
+    /// A relative `bundle_url` is resolved against `base_url` (the registry
+    /// that served the index), so `PANDEMIC_REGISTRY_URL` / `--registry-url`
+    /// control both the index and the bundles. The download is
+    /// integrity-checked against the index's `checksum`, and extraction uses
+    /// `Entry::unpack_in`, which refuses absolute paths and `..` components so
+    /// nothing can land outside `root` (tar-slip guard).
+    pub async fn fetch_bundle_into(
+        &self,
+        base_url: &str,
+        summary: &InfectionSummary,
+        root: &Path,
+    ) -> Result<PathBuf> {
+        let bundle_url = summary.bundle_url.clone().ok_or_else(|| {
+            anyhow::anyhow!(
+                "'{}' has no spec bundle (it is a {} atom with no bundle_url)",
+                summary.name,
+                summary.type_
+            )
+        })?;
+        let bundle_url = resolve_bundle_url(base_url, &bundle_url);
+        let expected = summary.checksum.clone().ok_or_else(|| {
+            anyhow::anyhow!("'{}' has no bundle checksum; cannot verify integrity", summary.name)
+        })?;
+
+        let bytes = self
+            .client
+            .get(&bundle_url)
+            .send()
+            .await
+            .with_context(|| format!("downloading bundle for '{}'", summary.name))?
+            .bytes()
+            .await?;
+
+        verify_sha256(&bytes, &expected, &summary.name)?;
+        extract_bundle(&bytes, &summary.name, root)
+    }
+
     async fn fetch_registry_index(&self, registry_url: &str) -> Result<RegistryIndex> {
         let index_url = format!("{}/index.json", registry_url);
         let index = self
@@ -187,6 +251,74 @@ impl Default for RegistryClient {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Resolve a bundle URL against a registry base URL.
+///
+/// Absolute URLs (`http(s)://...`) are used as-is (backward compatible with
+/// older indices). Otherwise the path is joined onto `base_url`, which is the
+/// registry that served the index — so overriding the registry base controls
+/// where bundles are fetched from.
+///
+/// Pure and side-effect-free so it can be unit-tested without a network.
+pub fn resolve_bundle_url(base_url: &str, bundle_url: &str) -> String {
+    if bundle_url.starts_with("http://") || bundle_url.starts_with("https://") {
+        return bundle_url.to_string();
+    }
+    let base = if base_url.ends_with('/') {
+        base_url.to_string()
+    } else {
+        format!("{base_url}/")
+    };
+    format!("{base}{}", bundle_url.trim_start_matches('/'))
+}
+
+/// Verify a downloaded blob's sha256 against the index-published digest.
+///
+/// Pure and side-effect-free so it can be unit-tested without a network.
+pub fn verify_sha256(bytes: &[u8], expected: &str, name: &str) -> Result<()> {
+    let actual = sha256::digest(bytes);
+    if actual != expected {
+        bail!(
+            "checksum mismatch for '{name}' (expected {expected}, got {actual})"
+        )
+    }
+    Ok(())
+}
+
+/// Extract a tar.gz spec bundle into `root`, guarded against path traversal.
+///
+/// The bundle's top-level directory is the atom's name (that is how
+/// `scripts/generate-registry.sh` lays it out), so the extracted content lands
+/// at `root/<name>/`. Each entry is extracted with `Entry::unpack_in` —
+/// unlike `unpack`, it refuses absolute paths and `..` components, so a
+/// hostile bundle cannot write outside `root` (the tar-slip / path-traversal
+/// guard).
+pub fn extract_bundle(bytes: &[u8], name: &str, root: &Path) -> Result<PathBuf> {
+    std::fs::create_dir_all(root)
+        .with_context(|| format!("creating extraction dir {}", root.display()))?;
+
+    let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(bytes));
+    for entry in archive
+        .entries()
+        .with_context(|| format!("reading bundle entries for '{name}'"))?
+    {
+        let mut entry = entry.with_context(|| format!("reading a bundle entry for '{name}'"))?;
+        entry
+            .unpack_in(root)
+            .with_context(|| {
+                format!("extracting a bundle entry for '{name}' into {}", root.display())
+            })?;
+    }
+
+    let dir = root.join(name);
+    if !dir.is_dir() {
+        bail!(
+            "bundle '{name}' did not extract to the expected directory {}",
+            dir.display()
+        );
+    }
+    Ok(dir)
 }
 
 #[cfg(test)]
@@ -289,5 +421,129 @@ mod tests {
         let back: InfectionSummary = serde_json::from_str(&json).unwrap();
         assert_eq!(back.type_, "infection-spec");
         assert_eq!(back.bundle_url.as_deref(), Some("https://x/b.tar.gz"));
+    }
+
+    /// Build a real `.tar.gz` in memory: a top-level `<name>/` dir holding the
+    /// given relative files — mirroring `generate-registry.sh`'s layout.
+    fn make_bundle(name: &str, files: &[(&str, &[u8])]) -> Result<Vec<u8>> {
+        let mut tar = tar::Builder::new(Vec::new());
+        for &(relpath, data) in files {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(data.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            tar.append_data(&mut header, format!("{name}/{relpath}"), data)
+                .with_context(|| format!("adding {relpath} to bundle"))?;
+        }
+        let tar_bytes = tar.into_inner()?;
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        use std::io::Write;
+        enc.write_all(&tar_bytes)?;
+        Ok(enc.finish()?)
+    }
+
+    #[test]
+    fn verify_sha256_accepts_matching_rejects_other() {
+        let data = b"payload";
+        let good = sha256::digest(data);
+        assert!(verify_sha256(data, &good, "atom").is_ok(), "matching digest passes");
+        assert!(
+            verify_sha256(data, "deadbeef", "atom").is_err(),
+            "wrong digest fails"
+        );
+    }
+
+    #[test]
+    fn resolve_bundle_url_absolute_passthrough_and_relative_join() {
+        // Absolute bundle URLs are used verbatim (back-compat with older
+        // indices that publish absolute URLs), regardless of the base.
+        assert_eq!(
+            resolve_bundle_url(
+                "http://localhost:8000/registry/",
+                "https://x/registry/specs/rest.tar.gz"
+            ),
+            "https://x/registry/specs/rest.tar.gz"
+        );
+        assert_eq!(
+            resolve_bundle_url(
+                "http://localhost:8000/registry/",
+                "http://cdn.example.com/b.tar.gz"
+            ),
+            "http://cdn.example.com/b.tar.gz"
+        );
+
+        // Relative bundle URLs join onto the registry base that served the
+        // index, whether or not the base ends in a slash, and a stray leading
+        // slash on the bundle path is trimmed.
+        assert_eq!(
+            resolve_bundle_url(
+                "http://localhost:8000/registry/",
+                "specs/infections/rest.tar.gz"
+            ),
+            "http://localhost:8000/registry/specs/infections/rest.tar.gz"
+        );
+        assert_eq!(
+            resolve_bundle_url(
+                "http://localhost:8000/registry",
+                "specs/infections/rest.tar.gz"
+            ),
+            "http://localhost:8000/registry/specs/infections/rest.tar.gz"
+        );
+        assert_eq!(
+            resolve_bundle_url(
+                "http://localhost:8000/registry/",
+                "/specs/rest.tar.gz"
+            ),
+            "http://localhost:8000/registry/specs/rest.tar.gz"
+        );
+    }
+
+    #[test]
+    fn extract_bundle_lands_under_root_with_expected_layout() {
+        let bytes = make_bundle(
+            "rest",
+            &[
+                ("infection.toml", b"[infection]\nname = \"rest\"\n"),
+                ("files/rest-auth.toml", b"token = \"x\"\n"),
+                ("rest.service", b"[Unit]\nName=rest\n"),
+            ],
+        )
+        .unwrap();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = extract_bundle(&bytes, "rest", tmp.path()).unwrap();
+
+        // Returned dir is the atom's top-level dir, strictly under the root.
+        assert!(dir.starts_with(tmp.path()));
+        assert!(tmp.path().join("rest/infection.toml").is_file());
+        assert!(tmp.path().join("rest/files/rest-auth.toml").is_file());
+        assert!(tmp.path().join("rest/rest.service").is_file());
+    }
+
+    #[test]
+    fn extract_bundle_never_writes_outside_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let parent = tmp.path().parent().unwrap().to_path_buf();
+
+        match make_bundle("../evil", &[( "payload", b"pwned")]) {
+            Ok(bytes) => match extract_bundle(&bytes, "../evil", tmp.path()) {
+                Ok(dir) => {
+                    // If it succeeded at all, the dir must still be under the root.
+                    assert!(dir.starts_with(tmp.path()), "extracted dir escaped root");
+                }
+                Err(_) => {} // the traversal guard rejected it — expected.
+            },
+            Err(_) => {} // the tar crate refused to build a `..` entry — also safe.
+        }
+
+        // In every case, nothing may have been written outside the root.
+        assert!(
+            !parent.join("evil").exists(),
+            "path-traversal entry escaped the extraction root"
+        );
+        assert!(
+            !parent.join("payload").exists(),
+            "path-traversal entry escaped the extraction root"
+        );
     }
 }

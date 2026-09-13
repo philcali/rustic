@@ -3,3 +3,7 @@ test.socket
 auth.toml
 ca
 iam-anywhere-config.toml
+# Generated registry + binary artifacts (source lives in registry-src/;
+# produced by scripts/generate-registry.sh).
+registry/
+binaries/

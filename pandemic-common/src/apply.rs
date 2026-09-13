@@ -19,12 +19,13 @@ use pandemic_protocol::spec::{
 use pandemic_protocol::{ApplyDeploymentInfection, Plan, PlanUnit, RenderedFile, UserConfig};
 use sha2::{Digest, Sha256};
 
-/// Parse `--set key=value` pairs against a set of declared variable names.
-pub fn parse_set_args(
-    args: &[String],
-    declared: &[String],
-    context: &str,
-) -> Result<BTreeMap<String, String>> {
+/// Parse `--set key=value` pairs into a map, validating each key is a valid
+/// variable name (but *not* against a declared set — see [`validate_set`]).
+///
+/// Split from [`parse_set_args`] so a registry target — whose declared
+/// variables are only known after the bundle is materialized — can parse the
+/// raw `--set` values first and validate them later.
+pub fn parse_set_values(args: &[String]) -> Result<BTreeMap<String, String>> {
     let mut set = BTreeMap::new();
     for arg in args {
         let (key, value) = arg
@@ -33,14 +34,38 @@ pub fn parse_set_args(
         if !is_variable_name(key) {
             bail!("invalid variable name '{key}' in --set '{arg}'");
         }
+        set.insert(key.to_string(), value.to_string());
+    }
+    Ok(set)
+}
+
+/// Check every key in an already-parsed `set` map against declared variable
+/// names. Shared by the local flow (after reading the spec) and the registry
+/// flow (after materializing the bundle).
+pub fn validate_set(
+    set: &BTreeMap<String, String>,
+    declared: &[String],
+    context: &str,
+) -> Result<()> {
+    for key in set.keys() {
         if !declared.iter().any(|d| d == key) {
             bail!(
                 "unknown variable '{key}' for {context}: declared variables are [{}]",
                 declared.join(", ")
             );
         }
-        set.insert(key.to_string(), value.to_string());
     }
+    Ok(())
+}
+
+/// Parse `--set key=value` pairs against a set of declared variable names.
+pub fn parse_set_args(
+    args: &[String],
+    declared: &[String],
+    context: &str,
+) -> Result<BTreeMap<String, String>> {
+    let set = parse_set_values(args)?;
+    validate_set(&set, declared, context)?;
     Ok(set)
 }
 

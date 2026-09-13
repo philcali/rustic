@@ -147,7 +147,11 @@ if [ -d "$SPEC_SRC" ]; then
       bundle="$SPEC_OUT/$kind/$name.tar.gz"
       tar -czf "$bundle" -C "$SPEC_SRC/$kind" "$name"
       checksum=$(sha256sum "$bundle" | cut -d' ' -f1)
-      bundle_url="$BASE_URL/registry/specs/$kind/$name.tar.gz"
+      # Relative to the registry base (<base>/registry/), so the client can
+      # resolve it against whatever base served the index (PANDEMIC_REGISTRY_URL
+      # / --registry-url). On the default registry this is the same absolute
+      # URL as before; on a mirror it tracks the mirror.
+      bundle_url="specs/$kind/$name.tar.gz"
 
       version=$(grep -m1 '^version = ' "$spec_file" | sed 's/version = "\(.*\)"/\1/')
       [ -n "$version" ] || version="$VERSION"
