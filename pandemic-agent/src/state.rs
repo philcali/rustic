@@ -290,6 +290,43 @@ async fn uninstall_infection_in_impl(
     name: &str,
     suppress_owner_note: bool,
 ) -> Result<serde_json::Value> {
+    // Audit (ideas/deployments.md, phase 8): what was removed, and which
+    // users/groups were left in place.
+    match uninstall_infection_body(root, name, suppress_owner_note).await {
+        Ok((state, result)) => {
+            pandemic_common::audit::record_best_effort(&serde_json::json!({
+                "ts": pandemic_common::audit::now_rfc3339(),
+                "event": "uninstall_infection",
+                "name": name,
+                "version": state.version,
+                "owner": state.owner,
+                "outcome": "ok",
+                "removed_files": result.get("removed_files").cloned(),
+                "removed_state": result.get("removed_state").cloned(),
+                "left_users": state.users,
+                "left_groups": state.groups,
+                "notes": result.get("notes").cloned(),
+            }));
+            Ok(result)
+        }
+        Err(e) => {
+            pandemic_common::audit::record_best_effort(&serde_json::json!({
+                "ts": pandemic_common::audit::now_rfc3339(),
+                "event": "uninstall_infection",
+                "name": name,
+                "outcome": "failed",
+                "error": e.to_string(),
+            }));
+            Err(e)
+        }
+    }
+}
+
+async fn uninstall_infection_body(
+    root: &str,
+    name: &str,
+    suppress_owner_note: bool,
+) -> Result<(InfectionState, serde_json::Value)> {
     let state = load_state_in(root, name)?;
     let mut notes = Vec::new();
 
@@ -352,12 +389,15 @@ async fn uninstall_infection_in_impl(
         ));
     }
 
-    Ok(serde_json::json!({
-        "name": name,
-        "removed_files": removed_files,
-        "removed_state": removed_state,
-        "notes": notes,
-    }))
+    Ok((
+        state,
+        serde_json::json!({
+            "name": name,
+            "removed_files": removed_files,
+            "removed_state": removed_state,
+            "notes": notes,
+        }),
+    ))
 }
 
 #[cfg(test)]

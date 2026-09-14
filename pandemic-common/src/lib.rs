@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod apply;
+pub mod audit;
 pub mod client;
 pub mod registry;
 pub mod resolve;

@@ -472,6 +472,40 @@ pub async fn remove_deployment(
 }
 
 #[derive(Deserialize)]
+pub struct AuditQuery {
+    /// How many most recent entries to return (oldest → newest).
+    #[serde(default = "default_audit_limit")]
+    pub limit: usize,
+}
+
+fn default_audit_limit() -> usize {
+    50
+}
+
+/// `GET /api/admin/audit?limit=N` — the host audit log (phase 8): what the
+/// agent applied / uninstalled / removed, step by step. The log lives on
+/// disk (0600 root), so the agent writes it; REST only reads it back.
+pub async fn get_audit(
+    State(state): State<AppState>,
+    Extension(scopes): Extension<Vec<String>>,
+    Query(params): Query<AuditQuery>,
+) -> ApiResult {
+    require_scope!(&state.auth_config, &scopes, "admin");
+
+    let limit = params.limit.clamp(1, 500);
+    match pandemic_common::audit::read_last(limit) {
+        Ok(entries) => Ok(Json(json!({
+            "status": "success",
+            "data": { "entries": entries, "count": entries.len() }
+        }))),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"status": "error", "message": e.to_string()})),
+        )),
+    }
+}
+
+#[derive(Deserialize)]
 pub struct DeploymentInstallPayload {
     /// Registry deployment name (by-name install; its infection-spec atoms are
     /// pulled from the same registry). Mutually exclusive with `path`.

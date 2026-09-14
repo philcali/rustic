@@ -1,5 +1,6 @@
 mod agent;
 mod apply;
+mod audit;
 mod bootstrap;
 mod daemon;
 mod deployment;
@@ -61,6 +62,15 @@ enum Commands {
         agent_secret_path: Option<PathBuf>,
         #[command(subcommand)]
         action: InfectionAction,
+    },
+    /// Show the host audit log (what the agent applied / removed, and how)
+    Audit {
+        /// Number of most recent entries to show
+        #[arg(long, default_value = "20")]
+        limit: usize,
+        /// Raw JSON instead of the summary table
+        #[arg(long)]
+        json: bool,
     },
     /// Spec-driven deployment lifecycle (install / list / status / remove)
     Deployment {
@@ -352,6 +362,7 @@ async fn main() -> Result<()> {
             agent_secret_path,
             action,
         } => deployment::handle_deployment_command(action, agent_secret, agent_secret_path).await?,
+        Commands::Audit { limit, json } => audit::handle_audit_command(limit, json)?,
     }
 
     Ok(())

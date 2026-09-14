@@ -177,6 +177,46 @@ pub async fn remove_deployment_in(
     inf_root: &str,
     name: &str,
 ) -> Result<serde_json::Value> {
+    // Audit (ideas/deployments.md, phase 8): which infections were removed,
+    // skipped (and why), or failed.
+    match remove_deployment_body(dep_root, inf_root, name).await {
+        Ok(result) => {
+            let outcome = if result.get("record_removed") == Some(&serde_json::Value::Bool(true)) {
+                "ok"
+            } else {
+                "partial"
+            };
+            pandemic_common::audit::record_best_effort(&serde_json::json!({
+                "ts": pandemic_common::audit::now_rfc3339(),
+                "event": "remove_deployment",
+                "name": name,
+                "outcome": outcome,
+                "removed": result.get("removed").cloned(),
+                "skipped": result.get("skipped").cloned(),
+                "failed": result.get("failed").cloned(),
+                "record_removed": result.get("record_removed").cloned(),
+                "notes": result.get("notes").cloned(),
+            }));
+            Ok(result)
+        }
+        Err(e) => {
+            pandemic_common::audit::record_best_effort(&serde_json::json!({
+                "ts": pandemic_common::audit::now_rfc3339(),
+                "event": "remove_deployment",
+                "name": name,
+                "outcome": "failed",
+                "error": e.to_string(),
+            }));
+            Err(e)
+        }
+    }
+}
+
+async fn remove_deployment_body(
+    dep_root: &str,
+    inf_root: &str,
+    name: &str,
+) -> Result<serde_json::Value> {
     let state = load_deployment_in(dep_root, name)?;
 
     let mut removed = Vec::new();

@@ -32,33 +32,120 @@ use pandemic_protocol::spec::{
 };
 use pandemic_protocol::{ApplyDeploymentInfection, Plan};
 
-/// Steps already applied — reported when a later step fails.
+/// Steps applied so far, plus the context needed to write the audit entry
+/// (ideas/deployments.md, phase 8) when the operation ends — success or
+/// failure. Written on drop, so *every* exit path is covered: the audit
+/// log is exactly why a failed install still tells you which users/groups
+/// it left behind.
 struct Applied {
-    steps: Vec<String>,
+    /// (label, ok) in execution order.
+    steps: Vec<(String, bool)>,
+    created_users: Vec<String>,
+    created_groups: Vec<String>,
+    outcome: &'static str,
+    error: Option<String>,
+    name: String,
+    version: String,
+    owner: Option<String>,
+    /// Audit log path (overridden in tests).
+    pub(crate) audit_path: String,
+    audited: bool,
 }
 
 impl Applied {
-    fn new() -> Self {
-        Self { steps: Vec::new() }
+    fn new(plan: &Plan, owner: Option<&str>) -> Self {
+        Self {
+            steps: Vec::new(),
+            created_users: Vec::new(),
+            created_groups: Vec::new(),
+            outcome: "failed", // optimistic only via `complete()`
+            error: None,
+            name: plan.name.clone(),
+            version: plan.version.clone(),
+            owner: owner.map(String::from),
+            audit_path: pandemic_common::audit::AUDIT_FILE.to_string(),
+            audited: false,
+        }
     }
 
     fn record(&mut self, step: impl Into<String>) {
-        self.steps.push(step.into());
+        self.steps.push((step.into(), true));
     }
 
-    fn fail(&self, step: impl Into<String>, err: anyhow::Error) -> anyhow::Error {
-        let step = step.into();
+    fn mark_failed(&mut self, step: &str, err: &anyhow::Error) {
+        self.steps.push((step.into(), false));
+        self.outcome = "failed";
+        self.error = Some(err.to_string());
+    }
+
+    fn created_user(&mut self, name: String) {
+        self.created_users.push(name);
+    }
+
+    fn created_group(&mut self, name: String) {
+        self.created_groups.push(name);
+    }
+
+    /// The operation succeeded: write the audit entry now.
+    fn complete(&mut self) {
+        self.outcome = "ok";
+        self.error = None;
+        self.write_audit();
+    }
+
+    /// Enrich a failure with the steps already applied.
+    fn error_message(&self, step: &str, err: &anyhow::Error) -> anyhow::Error {
         let mut msg = format!("install of this infection failed at step '{step}': {err}");
-        if self.steps.is_empty() {
+        let applied: Vec<&String> = self
+            .steps
+            .iter()
+            .filter(|(_, ok)| *ok)
+            .map(|(label, _)| label)
+            .collect();
+        if applied.is_empty() {
             msg.push_str("\n  no steps were applied");
         } else {
             msg.push_str("\n  steps already applied:");
-            for s in &self.steps {
+            for s in &applied {
                 msg.push_str(&format!("\n    - {s}"));
             }
         }
         msg.push_str("\n  re-run the install to retry — completed steps are idempotent");
         anyhow::anyhow!("{msg}")
+    }
+
+    /// Append the audit entry (best-effort: a log failure must not change
+    /// the operation's outcome).
+    fn write_audit(&mut self) {
+        if self.audited {
+            return;
+        }
+        self.audited = true;
+        let entry = serde_json::json!({
+            "ts": pandemic_common::audit::now_rfc3339(),
+            "event": "apply_infection",
+            "name": self.name,
+            "version": self.version,
+            "owner": self.owner,
+            "outcome": self.outcome,
+            "error": self.error,
+            "steps": self
+                .steps
+                .iter()
+                .map(|(label, ok)| {
+                    serde_json::json!({ "step": label, "result": if *ok { "ok" } else { "failed" } })
+                })
+                .collect::<Vec<_>>(),
+            "created_users": self.created_users,
+            "created_groups": self.created_groups,
+        });
+        pandemic_common::audit::record_best_effort_in(&self.audit_path, &entry);
+    }
+}
+
+impl Drop for Applied {
+    fn drop(&mut self) {
+        self.write_audit();
     }
 }
 
@@ -69,7 +156,10 @@ fn step<R>(applied: &mut Applied, label: String, result: Result<R>) -> Result<R>
             applied.record(label);
             Ok(value)
         }
-        Err(err) => Err(applied.fail(label, err)),
+        Err(err) => {
+            applied.mark_failed(&label, &err);
+            Err(applied.error_message(&label, &err))
+        }
     }
 }
 
@@ -122,7 +212,7 @@ async fn run_health_check(cmd: &[String]) -> Result<()> {
 /// Apply one concrete infection plan and record it. `owner` is `None` for a
 /// standalone install, the deployment name when applied as part of one.
 pub async fn apply_infection(plan: &Plan, owner: Option<&str>) -> Result<serde_json::Value> {
-    let mut applied = Applied::new();
+    let mut applied = Applied::new(plan, owner);
 
     // 1. Packages — pick the manager this host supports.
     if !plan.declared_packages.is_empty() {
@@ -141,7 +231,6 @@ pub async fn apply_infection(plan: &Plan, owner: Option<&str>) -> Result<serde_j
     }
 
     // 2. Groups (skip ones that already exist).
-    let mut created_groups = Vec::new();
     if !plan.groups.is_empty() {
         let existing = crate::users::list_groups().await?;
         for group in &plan.groups {
@@ -154,12 +243,11 @@ pub async fn apply_infection(plan: &Plan, owner: Option<&str>) -> Result<serde_j
                 format!("create group '{group}'"),
                 crate::users::create_group(group).await,
             )?;
-            created_groups.push(group.clone());
+            applied.created_group(group.clone());
         }
     }
 
     // 3. Users (skip ones that already exist).
-    let mut created_users = Vec::new();
     if !plan.users.is_empty() {
         let existing = crate::users::list_users().await?;
         for (username, config) in &plan.users {
@@ -172,7 +260,7 @@ pub async fn apply_infection(plan: &Plan, owner: Option<&str>) -> Result<serde_j
                 format!("create user '{username}'"),
                 crate::users::create_user(username, config).await,
             )?;
-            created_users.push(username.clone());
+            applied.created_user(username.clone());
         }
     }
 
@@ -273,8 +361,8 @@ pub async fn apply_infection(plan: &Plan, owner: Option<&str>) -> Result<serde_j
         version: plan.version.clone(),
         description: plan.description.clone(),
         variables: plan.variables.clone(),
-        groups: created_groups,
-        users: created_users,
+        groups: applied.created_groups.clone(),
+        users: applied.created_users.clone(),
         files: recorded_files,
         unit: plan.unit.as_ref().map(|u| u.name.clone()),
         attach: plan.attach.clone(),
@@ -289,6 +377,7 @@ pub async fn apply_infection(plan: &Plan, owner: Option<&str>) -> Result<serde_j
         crate::state::record_infection(&plan.name, &state),
     )?;
 
+    applied.complete();
     Ok(serde_json::json!({
         "name": plan.name,
         "owner": owner,
@@ -338,24 +427,53 @@ fn preflight_ownership(dep_name: &str, infections: &[ApplyDeploymentInfection]) 
 /// Apply a whole deployment: ownership pre-flight, each infection in order
 /// (recorded with this deployment as owner), then the deployment record.
 /// Mirrors [`crate::deployments::remove_deployment`].
+///
+/// Each infection writes its own `apply_infection` audit entry; this
+/// wrapper adds the deployment-level summary (which infections made it,
+/// where it stopped).
 pub async fn apply_deployment(
     name: &str,
     version: &str,
     variables: &BTreeMap<String, String>,
     infections: &[ApplyDeploymentInfection],
 ) -> Result<serde_json::Value> {
-    preflight_ownership(name, infections)?;
+    let (applied, result) = apply_deployment_inner(name, version, variables, infections).await;
+
+    let entry = serde_json::json!({
+        "ts": pandemic_common::audit::now_rfc3339(),
+        "event": "apply_deployment",
+        "name": name,
+        "version": version,
+        "outcome": if result.is_ok() { "ok" } else { "failed" },
+        "applied": applied,
+        "error": result.as_ref().err().map(|e| e.to_string()),
+    });
+    pandemic_common::audit::record_best_effort(&entry);
+
+    result
+}
+
+async fn apply_deployment_inner(
+    name: &str,
+    version: &str,
+    variables: &BTreeMap<String, String>,
+    infections: &[ApplyDeploymentInfection],
+) -> (Vec<String>, Result<serde_json::Value>) {
+    if let Err(e) = preflight_ownership(name, infections) {
+        return (Vec::new(), Err(e));
+    }
 
     let mut applied: Vec<String> = Vec::new();
     for inf in infections {
-        apply_infection(&inf.plan, Some(name))
-            .await
-            .map_err(|err| {
-                anyhow!(
+        if let Err(err) = apply_infection(&inf.plan, Some(name)).await {
+            return (
+                applied,
+                Err(anyhow!(
                     "deployment '{}' failed on infection '{}':\n\n{err}\n\n  no deployment record was written; infections already applied remain installed",
                     name, inf.name
-                )
-            })?;
+                )),
+            );
+        }
         applied.push(inf.name.clone());
     }
 
@@ -374,11 +492,129 @@ pub async fn apply_deployment(
             .collect(),
         installed_at: None, // the record helper stamps it
     };
-    crate::deployments::record_deployment(name, &state)?;
+    if let Err(e) = crate::deployments::record_deployment(name, &state) {
+        return (applied, Err(e));
+    }
 
-    Ok(serde_json::json!({
-        "name": name,
-        "applied": applied,
-        "record_written": true
-    }))
+    (
+        applied.clone(),
+        Ok(serde_json::json!({
+            "name": name,
+            "applied": applied,
+            "record_written": true
+        })),
+    )
+}
+
+#[cfg(test)]
+mod audit_tests {
+    use super::*;
+
+    fn plan(name: &str) -> Plan {
+        Plan {
+            name: name.into(),
+            version: "9.9.9".into(),
+            description: String::new(),
+            variables: BTreeMap::new(),
+            files: Vec::new(),
+            unit: None,
+            attach: None,
+            health_check: Vec::new(),
+            health_interval: 30,
+            declared_packages: BTreeMap::new(),
+            groups: Vec::new(),
+            users: Vec::new(),
+        }
+    }
+
+    fn temp_audit(label: &str) -> String {
+        let dir = std::env::temp_dir().join(format!(
+            "pandemic-agent-audit-{}-{label}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("audit.jsonl").to_string_lossy().into_owned()
+    }
+
+    fn read_entry(path: &str) -> serde_json::Value {
+        let raw = std::fs::read_to_string(path).unwrap();
+        serde_json::from_str(raw.lines().next().unwrap()).unwrap()
+    }
+
+    fn cleanup(path: &str) {
+        let _ = std::fs::remove_dir_all(std::path::Path::new(path).parent().unwrap());
+    }
+
+    #[test]
+    fn success_writes_ok_entry_with_steps_and_created() {
+        let path = temp_audit("ok");
+        let mut a = Applied::new(&plan("alpha"), Some("web-tier"));
+        a.audit_path = path.clone();
+        a.record("create group 'alpha'");
+        a.created_group("alpha".into());
+        a.record("record infection state");
+        a.complete();
+
+        let entry = read_entry(&path);
+        assert_eq!(entry["event"], "apply_infection");
+        assert_eq!(entry["name"], "alpha");
+        assert_eq!(entry["owner"], "web-tier");
+        assert_eq!(entry["outcome"], "ok");
+        assert!(entry["error"].is_null());
+        let steps = entry["steps"].as_array().unwrap();
+        assert_eq!(steps.len(), 2);
+        assert_eq!(steps[0]["step"], "create group 'alpha'");
+        assert_eq!(steps[0]["result"], "ok");
+        assert_eq!(entry["created_groups"], serde_json::json!(["alpha"]));
+        assert!(
+            entry["ts"].as_str().unwrap().len() >= 20,
+            "RFC3339 timestamp"
+        );
+        cleanup(&path);
+    }
+
+    #[test]
+    fn failure_writes_failed_entry_on_drop() {
+        let path = temp_audit("fail");
+        {
+            let mut a = Applied::new(&plan("beta"), None);
+            a.audit_path = path.clone();
+            a.record("create user 'beta'");
+            a.created_user("beta".into());
+            a.mark_failed("write /etc/beta.conf", &anyhow::anyhow!("disk on fire"));
+            // Simulates an early `?` return: no `complete()`, guard dropped.
+        }
+
+        let entry = read_entry(&path);
+        assert_eq!(entry["outcome"], "failed");
+        assert_eq!(entry["error"], "disk on fire");
+        let steps = entry["steps"].as_array().unwrap();
+        assert_eq!(steps[0]["result"], "ok");
+        assert_eq!(steps[1]["step"], "write /etc/beta.conf");
+        assert_eq!(steps[1]["result"], "failed");
+        assert_eq!(
+            entry["created_users"],
+            serde_json::json!(["beta"]),
+            "a failed install must still report what it created"
+        );
+        cleanup(&path);
+    }
+
+    #[test]
+    fn drop_does_not_double_write() {
+        let path = temp_audit("double");
+        let mut a = Applied::new(&plan("gamma"), None);
+        a.audit_path = path.clone();
+        a.complete(); // writes once here
+        drop(a); // Drop must not write again
+
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            raw.lines().count(),
+            1,
+            "exactly one audit line per operation"
+        );
+        cleanup(&path);
+    }
 }
