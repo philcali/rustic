@@ -180,8 +180,11 @@ pub async fn create_user(username: &str, config: &UserConfig) -> anyhow::Result<
     // Idempotent: a retried install may find the user already created (an
     // earlier attempt can succeed at useradd and fail on a later step).
     // Re-assert group membership and treat it as success.
-    let user_exists =
-        Command::new("id").arg(username).status().map(|s| s.success()).unwrap_or(false);
+    let user_exists = Command::new("id")
+        .arg(username)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
     if user_exists {
         ensure_user_groups(username, config);
         return Ok(());
@@ -349,6 +352,28 @@ pub async fn delete_user(username: &str) -> anyhow::Result<()> {
         ));
     }
     Ok(())
+}
+
+/// Read-only existence check. Unlike `list_users`, this is *not*
+/// blocklist-guarded: existence is a host fact (a preview needs the true
+/// state); the blocklist guards mutations.
+pub fn user_exists(username: &str) -> bool {
+    Command::new("getent")
+        .arg("passwd")
+        .arg(username)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Read-only existence check (see [`user_exists`]).
+pub fn group_exists(groupname: &str) -> bool {
+    Command::new("getent")
+        .arg("group")
+        .arg(groupname)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 pub async fn list_users() -> anyhow::Result<Vec<String>> {

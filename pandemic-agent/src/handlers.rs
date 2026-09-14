@@ -373,5 +373,14 @@ pub async fn handle_agent_request(request: AgentRequest) -> Response {
                 Err(e) => Response::error(format!("Failed to apply deployment: {e}")),
             }
         }
+
+        AgentRequest::PreviewInfection { plan } => {
+            info!("Previewing infection plan: {}", plan.name);
+            Response::success_with_data(crate::preview::preview_infection(&plan).await)
+        }
+        AgentRequest::PreviewDeployment { infections } => {
+            info!("Previewing deployment ({} infections)", infections.len());
+            Response::success_with_data(crate::preview::preview_deployment(&infections).await)
+        }
     }
 }

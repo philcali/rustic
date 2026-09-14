@@ -343,13 +343,52 @@ function planRow(label, inner) {
     return `<div class="plan-row"><span class="plan-label">${label}</span><span>${inner}</span></div>`;
 }
 
+function fileDiffLabel(state) {
+    switch (state) {
+        case 'absent': return 'will be created';
+        case 'unchanged': return 'no change';
+        case 'modified': return 'will be replaced';
+        default: return String(state);
+    }
+}
+
+function guDiff(label, g) {
+    if (!g) return '';
+    const bits = [];
+    if ((g.present || []).length) bits.push(`existing: ${(g.present || []).map(esc).join(', ')}`);
+    if ((g.missing || []).length) bits.push(`to create: ${(g.missing || []).map(esc).join(', ')}`);
+    return bits.length ? `${label}: ${bits.join(' · ')}` : '';
+}
+
+/** Host diff block (phase 8): what applying would change on this host. */
+function renderDiff(d) {
+    if (!d) return '';
+    const rows = [];
+    if (d.already_recorded) rows.push('<span class="status status-inactive">already installed on host — applying re-applies / upgrades it</span>');
+    if (d.selected_package_manager) rows.push(`package manager: <span class="version">${esc(d.selected_package_manager)}</span>`);
+    if (d.unit) rows.push(`unit: file ${d.unit.file_exists ? 'present' : 'absent'} · ${d.unit.active ? 'active' : 'inactive'}`);
+    if (d.attach) rows.push(`attach target: ${d.attach.active ? 'active' : 'inactive'}`);
+    const g = [guDiff('groups', d.groups), guDiff('users', d.users)].filter(Boolean).join(' · ');
+    if (g) rows.push(g);
+    if (rows.length === 0) return '';
+    return `<div class="plan-diff">
+        <div class="plan-diff-head">On this host:</div>
+        ${rows.map(r => `<div class="plan-diff-row">${r}</div>`).join('')}
+    </div>`;
+}
+
 function renderPlanInfection(r) {
     const p = r.preview || {};
+    const d = r.diff || null;
+    const fileDiff = (target) => {
+        const f = (d && d.files || []).find(x => x.target === target);
+        return f ? ` <span class="muted">→ ${esc(fileDiffLabel(f.state))}</span>` : '';
+    };
     const packages = Object.entries(p.declared_packages || {})
         .map(([mgr, list]) => `${esc(mgr)}: ${list.map(esc).join(', ')}`)
         .join(' · ');
     const files = (p.files || [])
-        .map(f => `${esc(f.target)} <span class="muted">${esc(f.owner)}:${esc(f.mode)}</span>${hashSpan(f.sha256)}`)
+        .map(f => `${esc(f.target)} <span class="muted">${esc(f.owner)}:${esc(f.mode)}</span>${hashSpan(f.sha256)}${fileDiff(f.target)}`)
         .join('<br>');
     const users = (p.users || []).map(u => `<span class="version">${esc(u)}</span>`).join(' ');
     const unit = p.unit
@@ -373,6 +412,7 @@ function renderPlanInfection(r) {
         ${planRow('groups', (p.groups || []).map(g => `<span class="version">${esc(g)}</span>`).join(' '))}
         ${planRow('users', users)}
         ${variableNamesBlock(p.variable_names)}
+        ${renderDiff(d)}
     </div>`;
 }
 
@@ -386,6 +426,6 @@ function renderPlanPreview(data) {
         </div>
         ${variableNamesBlock(data.shared_variable_names)}
         ${infections.map(renderPlanInfection).join('') || '<div class="empty">No infections in this deployment.</div>'}
-        <div class="muted">File contents, variable values, and health-check commands are hidden in the preview; applying sends the fully rendered plan to the agent.</div>
+        <div class="muted">File contents, variable values, and health-check commands are hidden in the preview. When the agent is reachable, each infection also shows what applying would change on the host. Applying sends the fully rendered plan to the agent.</div>
     </div>`;
 }

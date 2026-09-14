@@ -262,6 +262,24 @@ pub enum AgentRequest {
         /// per-infection record metadata + concrete plans, in install order
         infections: Vec<ApplyDeploymentInfection>,
     },
+
+    // Host preview / diff (ideas/deployments.md, phase 8). Read-only:
+    // reports what applying the plan(s) would change, without writing
+    // anything. The client merges the result into the redacted dry-run.
+    /// Preview one concrete plan against host state (zero writes): per-file
+    /// absent/unchanged/modified (by sha256), unit file + active state,
+    /// attach target active, groups/users present, the package manager this
+    /// host would use, and whether a state record already exists.
+    PreviewInfection {
+        /// the concrete plan to preview
+        plan: Plan,
+    },
+    /// Preview every infection of a deployment (same per-infection shape,
+    /// in the given order).
+    PreviewDeployment {
+        /// per-infection metadata + concrete plans, in install order
+        infections: Vec<ApplyDeploymentInfection>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

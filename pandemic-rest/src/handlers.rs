@@ -494,6 +494,28 @@ pub struct DeploymentInstallPayload {
     dry_run: bool,
 }
 
+/// Attach the agent's per-infection diff to the dry-run payload (phase 8):
+/// each `data.infections[i]` gets a `diff` object, matched by name.
+fn merge_diff_into_preview(data: &mut Value, diff: &Value) {
+    let Some(diff_infections) = diff.get("infections").and_then(Value::as_array) else {
+        return;
+    };
+    let Some(infections) = data.get_mut("infections").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for infection in infections {
+        let Some(name) = infection.get("name").and_then(Value::as_str) else {
+            continue;
+        };
+        if let Some(matched) = diff_infections
+            .iter()
+            .find(|d| d.get("name").and_then(Value::as_str) == Some(name))
+        {
+            infection["diff"] = matched.clone();
+        }
+    }
+}
+
 /// `POST /api/admin/deployments` — the Plan/Apply consolidation.
 ///
 /// Builds the concrete deployment plan (resolve + render + validate) from
@@ -539,10 +561,20 @@ pub async fn install_deployment(
     // rendered file/unit contents, and the health-check command never leave
     // the host — only names, targets, owners, modes, and content hashes.
     if payload.dry_run {
-        return Ok(Json(json!({
-            "status": "success",
-            "data": pandemic_common::deployment_preview_data(&dp),
-        })));
+        let mut data = pandemic_common::deployment_preview_data(&dp);
+        // Best-effort host diff (phase 8): what applying would change.
+        // Omitted when the agent is unreachable, so an offline dry-run
+        // (reviewing a spec with no host) still succeeds.
+        let agent_client = AgentClient::new().with_secret(&state.agent_secret);
+        let request = AgentRequest::PreviewDeployment {
+            infections: pandemic_common::deployment_apply_infections(&dp),
+        };
+        if let Ok(PandemicResponse::Success { data: Some(diff) }) =
+            agent_client.send_agent_request(&request).await
+        {
+            merge_diff_into_preview(&mut data, &diff);
+        }
+        return Ok(Json(json!({ "status": "success", "data": data })));
     }
 
     let request = AgentRequest::ApplyDeployment {
@@ -554,4 +586,48 @@ pub async fn install_deployment(
     let agent_client = AgentClient::new().with_secret(&state.agent_secret);
     let response = agent_client.send_agent_request(&request);
     format_pandemic_response(response.await)
+}
+
+#[cfg(test)]
+mod merge_diff_tests {
+    use super::merge_diff_into_preview;
+    use serde_json::json;
+
+    #[test]
+    fn merges_matching_infections_by_name() {
+        let mut data = json!({
+            "name": "web-tier",
+            "infections": [
+                { "name": "alpha", "order": 1 },
+                { "name": "beta", "order": 2 }
+            ]
+        });
+        let diff = json!({
+            "infections": [
+                { "name": "beta", "files": [] },
+                { "name": "alpha", "files": [] }
+            ]
+        });
+        merge_diff_into_preview(&mut data, &diff);
+        let infections = data["infections"].as_array().unwrap();
+        assert!(infections[0]["diff"]["files"].is_array());
+        assert_eq!(infections[0]["diff"]["files"].as_array().unwrap().len(), 0);
+        assert!(infections[1]["diff"]["files"].is_array());
+    }
+
+    #[test]
+    fn unmatched_infections_and_malformed_shapes_are_noops() {
+        let mut data = json!({ "infections": [ { "name": "alpha" } ] });
+        // diff names don't match -> no diff attached
+        merge_diff_into_preview(&mut data, &json!({ "infections": [ { "name": "other" } ] }));
+        assert!(data["infections"][0].get("diff").is_none());
+        // malformed diff -> untouched
+        let mut data = json!({ "infections": [ { "name": "alpha" } ] });
+        merge_diff_into_preview(&mut data, &json!({ "not_infections": [] }));
+        assert!(data["infections"][0].get("diff").is_none());
+        // malformed data -> no panic
+        let mut data = json!({ "infections": "scalar" });
+        merge_diff_into_preview(&mut data, &json!({ "infections": [] }));
+        assert_eq!(data["infections"], "scalar");
+    }
 }

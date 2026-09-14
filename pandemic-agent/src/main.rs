@@ -4,6 +4,7 @@ mod files;
 mod handlers;
 mod infection;
 mod packages;
+mod preview;
 mod socket;
 mod state;
 mod systemd;

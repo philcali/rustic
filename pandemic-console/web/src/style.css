@@ -701,3 +701,21 @@ section h3 {
   gap: 0.75rem;
   margin-bottom: 0.5rem;
 }
+
+.plan-diff {
+  margin-top: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  border-left: 3px solid var(--border-color);
+  background: rgba(255, 255, 255, 0.04);
+  border-radius: 0 4px 4px 0;
+  font-size: 0.85rem;
+}
+
+.plan-diff-head {
+  color: var(--text-muted);
+  margin-bottom: 0.25rem;
+}
+
+.plan-diff-row {
+  margin-bottom: 0.2rem;
+}

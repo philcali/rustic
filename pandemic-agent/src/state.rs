@@ -244,7 +244,7 @@ pub async fn infection_status_in(root: &str, name: &str) -> Result<serde_json::V
 }
 
 /// `systemctl is-active <unit>` as a bool (false when systemctl is missing).
-fn is_active(unit: &str) -> bool {
+pub fn is_active(unit: &str) -> bool {
     let output = Command::new("systemctl")
         .args(["is-active", unit])
         .output()
@@ -253,10 +253,15 @@ fn is_active(unit: &str) -> bool {
     output.as_deref() == Some("active")
 }
 
+/// sha256 (hex) of a byte slice.
+pub fn sha256_bytes(bytes: &[u8]) -> String {
+    hex::encode(Sha256::digest(bytes))
+}
+
 /// sha256 (hex) of a file's contents; `None` when unreadable.
-fn sha256_file(path: &str) -> Option<String> {
+pub fn sha256_file(path: &str) -> Option<String> {
     let bytes = std::fs::read(path).ok()?;
-    Some(hex::encode(Sha256::digest(bytes)))
+    Some(sha256_bytes(&bytes))
 }
 
 /// Uninstall an infection under the default root.
