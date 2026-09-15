@@ -41,6 +41,14 @@ pandemic-cli daemon status
 hello-infection
 ```
 
+## Deployments (Spec-Driven Install)
+
+Install software as declarative, templated infection and deployment specs —
+with dry-run preview, drift-aware status, ownership-respecting removal, an
+audit log, and a two-step web console flow. See the full how-to in
+[deployments.md](deployments.md): spec anatomy, CLI/REST/console, registry
+publishing, state & ownership, rollback and `--purge` policy.
+
 ## Static Registry
 
 Pandemic comes with a software registry that is created for every

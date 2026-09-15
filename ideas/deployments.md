@@ -177,18 +177,20 @@ New protocol surface: `InfectionSpec` / `DeploymentSpec` / plan types in `pandem
 pandemic-cli deployment install <path|name> [--set k=v ...] [--registry-url URL] [--dry-run]
 pandemic-cli deployment list
 pandemic-cli deployment status [name]
-pandemic-cli deployment remove <name>
+pandemic-cli deployment remove <name> [--purge]
 
 pandemic-cli infection install <path|name> [--set k=v ...] [--registry-url URL]
 pandemic-cli infection status [name]
-pandemic-cli infection uninstall <name>
+pandemic-cli infection uninstall <name> [--purge]
 
 pandemic-cli registry find <query> [--registry-url URL]
 pandemic-cli registry get <name> [--registry-url URL]
 pandemic-cli registry install <name> [--registry-url URL]
+
+pandemic-cli audit [--limit N] [--json]
 ```
 
-`--dry-run` resolves, renders, and prints the full plan — packages, files with diffs against what's on disk, user and unit actions — without applying. This is the "plan" view: the review moment before root does anything.
+`--dry-run` resolves, renders, and prints the full plan — packages, files with diffs against what's on disk, user and unit actions — without applying. This is the "plan" view: the review moment before root does anything. `--purge` on the removal commands additionally deletes the users/groups the state record says the infection(s) created (policy in `docs/deployments.md`); default removal leaves them in place.
 
 ## Console & API Surface
 
@@ -210,14 +212,16 @@ Both layers are distributable. Infection specs are the publishable atom; a deplo
 
 ## Security Considerations
 
-- A registry-fetched spec applied as root is a privilege-escalation channel. Checksums (then signatures, shared with epidemic) are required before `source = "<registry-name>"` is considered production-ready.
-- **Registry resolution stays client-side for now** (option a): the agent's `Plan*` / `Apply*` never do a network fetch — the client (CLI/REST) resolves `source = "<name>"` and sends a concrete spec. Agent-side resolution (option b) is deferred to **Hardening**, gated on the checksums/signatures above.
+- A registry-fetched spec applied as root is a privilege-escalation channel. **Checksums are done and enforced**: every bundle fetch is sha256-verified against the index before anything is applied. **Signatures (shared with epidemic) remain the production gate.**
+- **Registry resolution stays client-side (option a — decision: defer option b).** The agent's `Plan*` / `Apply*` never do a network fetch — the client (CLI/REST) resolves `source = "<name>"` and sends a concrete spec. Agent-side resolution (option b) is **deferred**: it would be unguarded root network access. Unblock criteria: signatures on the index + bundles (the production gate above), a guarded agent fetch path (pinned URL, allowlisted hosts, no proxy), and a threat-model note for epidemic — revisit together with epidemic's own trust boundary.
+- **Dry-run wire response is redacted** (done, phase 8): names, targets, owners, modes, content hashes, user *names*, health interval — never variable values, rendered file contents, or the health command — so the console and any API consumer inherit the same guarantee.
+- **Removal policy for created users/groups** (decided, phase 8): default leaves them in place (they may be shared) and reports them; opt-in `--purge` deletes only what the state record says the infection created, users first, groups only when provably memberless, blocklist-guarded.
 - `WriteFile` is path-restricted in v1: allowlisted prefixes (`/etc`, `/opt`, `/usr/local`, `/var`), and never the agent secret, socket dir, or agent/daemon binaries.
 - Variables may carry secret values; rendered state files are `0600` root-only. Secret *management* itself is out of scope — `pandemic-iam` is the planned home.
 
 ## Implementation Plan
 
-Phases 1–7 are done: the pure `Plan` step (resolve + render + validate) is consolidated in `pandemic_common`, shared by the CLI and REST, while the privileged `Apply` step runs in the agent — one code path for every surface. The console Deployments tab (6) is in, with the two-step preview → apply install flow. Only Hardening (8) remains.
+**All eight phases are done.** The pure `Plan` step (resolve + render + validate) is consolidated in `pandemic_common`, shared by the CLI and REST, while the privileged `Apply` step runs in the agent — one code path for every surface. The console Deployments tab (6) is in, with the two-step preview → apply install flow, and Hardening (8) landed the redacted wire dry-run, per-infection diffs, the audit log, best-effort rollback, and the `--purge` policy. Operator how-to: `docs/deployments.md`.
 
 1. **Schema & render** — (done) `InfectionSpec` / `DeploymentSpec` in `pandemic-protocol`; TOML parsing, variable resolution, validation (shared `pandemic-protocol::spec`).
 2. **Agent primitives** — (done) `PackageInstall`, `WriteFile` handlers; package-manager detection via `GetCapabilities`.
@@ -226,7 +230,7 @@ Phases 1–7 are done: the pure `Plan` step (resolve + render + validate) is con
 5. **Plan/Apply consolidation** — (done) the pure `Plan` step (resolve + render + validate) lives in `pandemic_common`, shared by CLI + REST; the privileged `Apply` step runs in the agent; one code path for every surface.
 6. **Deployment UX** — (done) `/api/admin/deployments*` + `POST` install (name/path + `vars` + `dry_run`); console Deployments tab: two-step install (preview the rendered plan via `dry_run: true`, then apply the identical payload with `dry_run: false`), list, status, remove; capability-gated on the agent's `deployment_lifecycle` capability. The browser never shows variable *values* or rendered file contents — only names, target paths, and modes.
 7. **Registry** — (done) spec + deployment atoms in the registry index (checksummed bundles, relative `bundle_url`); client-side `source` name resolution (`pandemic_common::resolve`); `registry find` (client-side, mirrored at `GET /api/admin/registry/find`); `--registry-url` / `PANDEMIC_REGISTRY_URL` steer both index and bundles (see Security).
-8. **Hardening** — dry-run diffs, checksums, audit log of applied steps, best-effort rollback; **revisit agent-side registry resolution (option b) now that checksums exist.** Also: strip variable *values* and rendered file contents from the dry-run wire response (the console masks them today; the API still returns them), and decide removal policy for users/groups an infection created (currently left in place — possibly shared — but only tracked in state when created by the *final* successful apply).
+8. **Hardening** — (done) dry-run wire response redacted (values, file contents, and the health command never leave the agent; the CLI's local `--dry-run` keeps the operator's full view); per-infection `diff` against host state merged into the dry-run response (degrades gracefully when the agent is unreachable); append-only audit log at `/var/log/pandemic/audit.jsonl` (0600) with step-level outcomes, viewable via `pandemic-cli audit` and `GET /api/admin/audit`; best-effort rollback of a failed deployment run (fresh installs uninstalled in reverse, pre-existing left, reported in the error + audit; standalone installs keep the idempotent-retry model); `--purge` on `infection uninstall` / `deployment remove` (REST `?purge=true`) deleting only state-recorded created users/groups with the member-count and blocklist guards — default stays leave-in-place; docs sweep in `docs/deployments.md`. Checksums were completed in phase 7 (enforced on every bundle fetch). **Agent-side registry resolution (option b): decision — defer, stay client-side** (see Security; signatures are the production gate and agent-side fetch would be unguarded root network access until they land).
 
 ## Open Questions
 

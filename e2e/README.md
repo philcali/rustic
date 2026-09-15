@@ -51,10 +51,10 @@ done
 
 ## Bootstrapping the stack
 
-`bootstrap install` creates the `pandemic` user, installs and **enables**
-the units (but does not start them), and — with `--with-agent` — also
-installs `pandemic-agent` and mints `/etc/pandemic/agent-secret`
-(0600 root:root):
+`bootstrap install` installs and **enables** the units (but does not start
+them), and — with `--with-agent` — also installs `pandemic-agent` and mints
+`/etc/pandemic/agent-secret` (0600 root:root). It does **not** create any
+users or groups:
 
 ```bash
 docker exec -u root pandemic-e2e pandemic-cli bootstrap install --with-agent
