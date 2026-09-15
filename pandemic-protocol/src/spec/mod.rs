@@ -117,7 +117,9 @@ pub fn is_variable_name(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_variable_name, parse_deployment_spec, parse_infection_spec, validate_infection_name};
+    use super::{
+        is_variable_name, parse_deployment_spec, parse_infection_spec, validate_infection_name,
+    };
 
     /// The shipped registry source tree (`registry-src/`) must contain valid
     /// specs — a guard against publishing a broken atom. The deployment's
@@ -129,19 +131,24 @@ mod tests {
             .join("..")
             .join("registry-src");
         let read = |p: &std::path::Path| {
-            std::fs::read_to_string(p)
-                .unwrap_or_else(|e| panic!("read {}: {e}", p.display()))
+            std::fs::read_to_string(p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()))
         };
 
         let mosq = parse_infection_spec(&read(&root.join("infections/mosquitto/infection.toml")))
             .expect("mosquitto infection-spec parses");
         assert_eq!(mosq.meta.name, "mosquitto");
-        assert!(mosq.systemd.as_ref().unwrap().attach.is_some(), "mosquitto is an attach");
+        assert!(
+            mosq.systemd.as_ref().unwrap().attach.is_some(),
+            "mosquitto is an attach"
+        );
 
         let rest = parse_infection_spec(&read(&root.join("infections/rest/infection.toml")))
             .expect("rest infection-spec parses");
         assert_eq!(rest.meta.name, "rest");
-        assert!(rest.systemd.as_ref().unwrap().unit_file.is_some(), "rest has a unit");
+        assert!(
+            rest.systemd.as_ref().unwrap().unit_file.is_some(),
+            "rest has a unit"
+        );
 
         let dep = parse_deployment_spec(&read(&root.join("deployments/rest-mqtt/deployment.toml")))
             .expect("rest-mqtt deployment parses");

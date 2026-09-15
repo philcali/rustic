@@ -42,9 +42,7 @@ fn expect_atom_type(actual: &str, expected: &str, target: &str) -> Result<()> {
         DEPLOYMENT => format!("pandemic-cli deployment install {target}"),
         other => format!("(atom type `{other}`)"),
     };
-    bail!(
-        "'{target}' is a `{actual}` atom, not a `{expected}` atom.\n  to install it: {correct}"
-    )
+    bail!("'{target}' is a `{actual}` atom, not a `{expected}` atom.\n  to install it: {correct}")
 }
 
 /// Resolve a registry *infection-spec* atom into a concrete [`Plan`].
@@ -61,10 +59,13 @@ pub async fn resolve_infection_target(
     expect_atom_type(&summary.type_, INFECTION_SPEC, target)?;
 
     let root = tempfile::tempdir().context("creating a temp dir for the registry bundle")?;
-    let dir = client.fetch_bundle_into(&base, &summary, root.path()).await?;
+    let dir = client
+        .fetch_bundle_into(&base, &summary, root.path())
+        .await?;
 
-    let text = std::fs::read_to_string(dir.join("infection.toml"))
-        .with_context(|| format!("infection-spec bundle for '{target}' is missing infection.toml"))?;
+    let text = std::fs::read_to_string(dir.join("infection.toml")).with_context(|| {
+        format!("infection-spec bundle for '{target}' is missing infection.toml")
+    })?;
     let spec = parse_infection_spec(&text)
         .with_context(|| format!("parsing infection spec for '{target}'"))?;
 
@@ -92,21 +93,17 @@ pub async fn resolve_deployment_target(
     let root = tempfile::tempdir().context("creating a temp dir for the registry bundles")?;
 
     // 1. Fetch + extract the deployment atom.
-    let dep_dir = client.fetch_bundle_into(&base, &summary, root.path()).await?;
+    let dep_dir = client
+        .fetch_bundle_into(&base, &summary, root.path())
+        .await?;
     let dtext = std::fs::read_to_string(dep_dir.join("deployment.toml"))
-        .with_context(|| {
-            format!("deployment bundle for '{target}' is missing deployment.toml")
-        })?;
+        .with_context(|| format!("deployment bundle for '{target}' is missing deployment.toml"))?;
     let spec = parse_deployment_spec(&dtext)
         .with_context(|| format!("parsing deployment spec for '{target}'"))?;
 
     // Validate the caller's --set against the deployment's declared variables.
     let declared: Vec<String> = spec.variables.keys().cloned().collect();
-    validate_set(
-        set,
-        &declared,
-        &format!("deployment '{}'", spec.meta.name),
-    )?;
+    validate_set(set, &declared, &format!("deployment '{}'", spec.meta.name))?;
 
     // 2. Fetch + extract every bare-named infection this deployment references.
     for entry in &spec.infections {
@@ -124,7 +121,9 @@ pub async fn resolve_deployment_target(
                 inf.type_
             );
         }
-        client.fetch_bundle_into(&inf_base, &inf, root.path()).await?;
+        client
+            .fetch_bundle_into(&inf_base, &inf, root.path())
+            .await?;
     }
 
     // 3. Rewrite bare sources to `<name>/infection.toml` so the builder's

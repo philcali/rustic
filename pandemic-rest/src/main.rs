@@ -111,7 +111,9 @@ async fn main() -> Result<()> {
         }
     };
     if agent_secret.is_empty() {
-        return Err(anyhow::anyhow!("Agent secret is empty. Provide it via --agent-secret or --agent-secret-path"));
+        return Err(anyhow::anyhow!(
+            "Agent secret is empty. Provide it via --agent-secret or --agent-secret-path"
+        ));
     }
 
     // Set up application state

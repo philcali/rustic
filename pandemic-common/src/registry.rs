@@ -165,10 +165,7 @@ impl RegistryClient {
     /// summary — including the `type` discriminant, the spec-bundle URL, and
     /// its sha256. The base URL is needed to resolve a relative `bundle_url`
     /// against the registry that actually served the index.
-    pub async fn get_infection_summary(
-        &self,
-        name: &str,
-    ) -> Result<(String, InfectionSummary)> {
+    pub async fn get_infection_summary(&self, name: &str) -> Result<(String, InfectionSummary)> {
         for registry_url in &self.registries {
             if let Ok(index) = self.fetch_registry_index(registry_url).await {
                 if let Some(summary) = index.infections.get(name) {
@@ -207,7 +204,10 @@ impl RegistryClient {
         })?;
         let bundle_url = resolve_bundle_url(base_url, &bundle_url);
         let expected = summary.checksum.clone().ok_or_else(|| {
-            anyhow::anyhow!("'{}' has no bundle checksum; cannot verify integrity", summary.name)
+            anyhow::anyhow!(
+                "'{}' has no bundle checksum; cannot verify integrity",
+                summary.name
+            )
         })?;
 
         let bytes = self
@@ -279,9 +279,7 @@ pub fn resolve_bundle_url(base_url: &str, bundle_url: &str) -> String {
 pub fn verify_sha256(bytes: &[u8], expected: &str, name: &str) -> Result<()> {
     let actual = sha256::digest(bytes);
     if actual != expected {
-        bail!(
-            "checksum mismatch for '{name}' (expected {expected}, got {actual})"
-        )
+        bail!("checksum mismatch for '{name}' (expected {expected}, got {actual})")
     }
     Ok(())
 }
@@ -304,11 +302,12 @@ pub fn extract_bundle(bytes: &[u8], name: &str, root: &Path) -> Result<PathBuf> 
         .with_context(|| format!("reading bundle entries for '{name}'"))?
     {
         let mut entry = entry.with_context(|| format!("reading a bundle entry for '{name}'"))?;
-        entry
-            .unpack_in(root)
-            .with_context(|| {
-                format!("extracting a bundle entry for '{name}' into {}", root.display())
-            })?;
+        entry.unpack_in(root).with_context(|| {
+            format!(
+                "extracting a bundle entry for '{name}' into {}",
+                root.display()
+            )
+        })?;
     }
 
     let dir = root.join(name);
@@ -354,7 +353,10 @@ mod tests {
         let index: RegistryIndex = serde_json::from_str(json).expect("binary index parses");
         let m = &index.infections["mosquitto"];
         assert_eq!(m.type_, "infection");
-        assert_eq!(m.manifest_url.as_deref(), Some("https://x/registry/mosquitto.json"));
+        assert_eq!(
+            m.manifest_url.as_deref(),
+            Some("https://x/registry/mosquitto.json")
+        );
         assert_eq!(m.bundle_url, None);
         assert_eq!(m.checksum, None);
         assert_eq!(index.infections["pandemic-cli"].type_, "core");
@@ -399,7 +401,10 @@ mod tests {
 
         let dep = &index.infections["pandemic-full"];
         assert_eq!(dep.type_, "deployment");
-        assert_eq!(dep.bundle_url.as_deref(), Some("https://x/registry/specs/deployments/pandemic-full.tar.gz"));
+        assert_eq!(
+            dep.bundle_url.as_deref(),
+            Some("https://x/registry/specs/deployments/pandemic-full.tar.gz")
+        );
         assert_eq!(dep.checksum.as_deref(), Some("cafe0123"));
     }
 
@@ -417,7 +422,10 @@ mod tests {
             checksum: Some("abc".into()),
         };
         let json = serde_json::to_string(&summary).unwrap();
-        assert!(json.contains("\"type\":\"infection-spec\""), "emits `type` key, got {json}");
+        assert!(
+            json.contains("\"type\":\"infection-spec\""),
+            "emits `type` key, got {json}"
+        );
         let back: InfectionSummary = serde_json::from_str(&json).unwrap();
         assert_eq!(back.type_, "infection-spec");
         assert_eq!(back.bundle_url.as_deref(), Some("https://x/b.tar.gz"));
@@ -446,7 +454,10 @@ mod tests {
     fn verify_sha256_accepts_matching_rejects_other() {
         let data = b"payload";
         let good = sha256::digest(data);
-        assert!(verify_sha256(data, &good, "atom").is_ok(), "matching digest passes");
+        assert!(
+            verify_sha256(data, &good, "atom").is_ok(),
+            "matching digest passes"
+        );
         assert!(
             verify_sha256(data, "deadbeef", "atom").is_err(),
             "wrong digest fails"
@@ -490,10 +501,7 @@ mod tests {
             "http://localhost:8000/registry/specs/infections/rest.tar.gz"
         );
         assert_eq!(
-            resolve_bundle_url(
-                "http://localhost:8000/registry/",
-                "/specs/rest.tar.gz"
-            ),
+            resolve_bundle_url("http://localhost:8000/registry/", "/specs/rest.tar.gz"),
             "http://localhost:8000/registry/specs/rest.tar.gz"
         );
     }
@@ -525,7 +533,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let parent = tmp.path().parent().unwrap().to_path_buf();
 
-        match make_bundle("../evil", &[( "payload", b"pwned")]) {
+        match make_bundle("../evil", &[("payload", b"pwned")]) {
             Ok(bytes) => match extract_bundle(&bytes, "../evil", tmp.path()) {
                 Ok(dir) => {
                     // If it succeeded at all, the dir must still be under the root.
