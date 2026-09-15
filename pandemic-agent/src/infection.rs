@@ -171,14 +171,6 @@ async fn ensure_unit_loaded(unit: &str) -> Result<()> {
     }
 }
 
-async fn daemon_reload() -> Result<()> {
-    let status = Command::new("systemctl").arg("daemon-reload").status()?;
-    if !status.success() {
-        bail!("systemctl daemon-reload failed");
-    }
-    Ok(())
-}
-
 /// Install the sidecar unit + proxy config and start everything.
 pub async fn attach_infection(params: &AttachParams) -> Result<serde_json::Value> {
     let resolved = resolve(params)?;
@@ -212,7 +204,7 @@ pub async fn attach_infection(params: &AttachParams) -> Result<serde_json::Value
     )
     .with_context(|| format!("writing {}", unit_path.display()))?;
 
-    daemon_reload().await?;
+    crate::systemd::daemon_reload().await?;
 
     let output = Command::new("systemctl")
         .args(["enable", "--now", &service_name])
@@ -260,7 +252,7 @@ pub async fn detach_infection(name: &str) -> Result<serde_json::Value> {
     // Drop the infections dir if it is now empty (best effort).
     let _ = std::fs::remove_dir(INFECTIONS_DIR);
 
-    daemon_reload().await?;
+    crate::systemd::daemon_reload().await?;
 
     Ok(serde_json::json!({
         "name": name,

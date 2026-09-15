@@ -155,7 +155,41 @@ fn get_default_blocklist() -> (HashSet<String>, HashSet<String>) {
     (users, groups)
 }
 
+/// Add `username` to every group in the config (no-op when already a member).
+fn ensure_user_groups(username: &str, config: &UserConfig) {
+    if let Some(groups) = &config.groups {
+        for group in groups {
+            let status = Command::new("usermod")
+                .arg("-a")
+                .arg("-G")
+                .arg(group)
+                .arg(username)
+                .status();
+            match status {
+                Ok(s) if !s.success() => {
+                    warn!("Failed to add user {} to group {}", username, group)
+                }
+                Err(e) => warn!("usermod for user {} failed: {}", username, e),
+                _ => {}
+            }
+        }
+    }
+}
+
 pub async fn create_user(username: &str, config: &UserConfig) -> anyhow::Result<()> {
+    // Idempotent: a retried install may find the user already created (an
+    // earlier attempt can succeed at useradd and fail on a later step).
+    // Re-assert group membership and treat it as success.
+    let user_exists = Command::new("id")
+        .arg(username)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if user_exists {
+        ensure_user_groups(username, config);
+        return Ok(());
+    }
+
     let mut cmd = Command::new("useradd");
 
     if let Some(shell) = &config.shell {
@@ -168,6 +202,26 @@ pub async fn create_user(username: &str, config: &UserConfig) -> anyhow::Result<
         cmd.arg("-r");
     }
 
+    // On USERGROUPS_ENAB distros (e.g. Ubuntu) `useradd` creates a private
+    // group named after the user and fails with "group <name> exists" when
+    // one is already there — infections typically create the same-named
+    // group in the preceding step. Adopt the existing group as the
+    // user's primary group instead of failing.
+    let same_name_group = config
+        .groups
+        .as_deref()
+        .map(|gs| gs.iter().any(|g| g == username))
+        .unwrap_or(false)
+        || Command::new("getent")
+            .arg("group")
+            .arg(username)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+    if same_name_group {
+        cmd.arg("-g").arg(username);
+    }
+
     cmd.arg(username);
     let output = cmd.output()?;
 
@@ -178,19 +232,7 @@ pub async fn create_user(username: &str, config: &UserConfig) -> anyhow::Result<
         ));
     }
 
-    if let Some(groups) = &config.groups {
-        for group in groups {
-            let status = Command::new("usermod")
-                .arg("-a")
-                .arg("-G")
-                .arg(group)
-                .arg(username)
-                .status()?;
-            if !status.success() {
-                warn!("Failed to add user {} to group {}", username, group);
-            }
-        }
-    }
+    ensure_user_groups(username, config);
 
     Ok(())
 }
@@ -312,6 +354,67 @@ pub async fn delete_user(username: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Read-only existence check. Unlike `list_users`, this is *not*
+/// blocklist-guarded: existence is a host fact (a preview needs the true
+/// state); the blocklist guards mutations.
+pub fn user_exists(username: &str) -> bool {
+    Command::new("getent")
+        .arg("passwd")
+        .arg(username)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Read-only existence check (see [`user_exists`]).
+pub fn group_exists(groupname: &str) -> bool {
+    Command::new("getent")
+        .arg("group")
+        .arg(groupname)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Total membership of `groupname`: secondary members listed in
+/// `getent group` **plus** users whose *primary* group is it (matched by
+/// gid against `getent passwd`). `None` when the group does not exist or
+/// membership cannot be determined — callers must treat `None` as
+/// "do not delete".
+///
+/// Purge (phase 8) uses this to refuse removing a group that anyone still
+/// belongs to; the blocklist guards the delete itself.
+pub fn group_member_count(groupname: &str) -> Option<usize> {
+    let output = Command::new("getent")
+        .arg("group")
+        .arg(groupname)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    // name:passwd:gid:members
+    let entry = String::from_utf8_lossy(&output.stdout).to_string();
+    let mut fields = entry.splitn(4, ':');
+    let _name = fields.next()?; // name
+    let _passwd = fields.next()?; // passwd
+    let gid: u32 = fields.next()?.parse().ok()?;
+    let members = fields.next().unwrap_or("");
+    let secondary = members.split(',').filter(|m| !m.is_empty()).count();
+
+    let gid_str = gid.to_string();
+    let passwd = Command::new("getent").arg("passwd").output().ok()?;
+    if !passwd.status.success() {
+        return None;
+    }
+    let primary = String::from_utf8_lossy(&passwd.stdout)
+        .lines()
+        .filter(|line| line.split(':').nth(3) == Some(gid_str.as_str()))
+        .count();
+
+    Some(secondary + primary)
+}
+
 pub async fn list_users() -> anyhow::Result<Vec<String>> {
     let output = Command::new("getent").arg("passwd").output()?;
     if !output.status.success() {
@@ -373,4 +476,18 @@ pub async fn delete_group(groupname: &str) -> anyhow::Result<()> {
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn group_member_count_root_and_missing() {
+        // Every Linux host has a 'root' group with at least one member.
+        assert!(group_member_count("root").unwrap_or(0) >= 1);
+        // A name no host has is `None` (indeterminate), not `Some(0)` —
+        // purge refuses to delete on `None`.
+        assert_eq!(group_member_count("pandemic-test-no-such-group"), None);
+    }
 }

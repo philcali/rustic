@@ -23,10 +23,11 @@ use auth::AuthConfig;
 use events::publish_event;
 use handlers::{
     add_user_to_group, control_system_service, create_group, create_user, delete_group,
-    delete_user, deregister_plugin, get_admin_capabilities, get_health, get_infection_manifest,
-    get_plugin, get_service_config, get_system_service, install_infection, list_groups,
-    list_plugins, list_system_services, list_users, modify_user, remove_user_from_group,
-    reset_service_config, search_infections, set_service_config, AppState,
+    delete_user, deregister_plugin, find_infections, get_admin_capabilities, get_audit,
+    get_deployment, get_health, get_infection_manifest, get_plugin, get_service_config,
+    get_system_service, install_deployment, install_infection, list_deployments, list_groups,
+    list_plugins, list_system_services, list_users, modify_user, remove_deployment,
+    remove_user_from_group, reset_service_config, set_service_config, AppState,
 };
 use middleware::auth_middleware;
 use std::sync::{Arc, Mutex};
@@ -97,16 +98,23 @@ async fn main() -> Result<()> {
 
     info!("Registered with pandemic daemon");
 
-    // Resolve agent secret
+    // Resolve agent secret. Trimmed to match how the agent and CLI read it
+    // (secret files commonly carry a trailing newline; the HMAC key must be
+    // byte-identical on both sides of the handshake).
     let agent_secret = match (&args.agent_secret, &args.agent_secret_path) {
-        (Some(s), _) => s.clone(),
-        (None, Some(path)) => tokio::fs::read_to_string(path).await?,
+        (Some(s), _) => s.trim().to_string(),
+        (None, Some(path)) => tokio::fs::read_to_string(path).await?.trim().to_string(),
         (None, None) => {
             return Err(anyhow::anyhow!(
                 "Agent secret is required. Provide it via --agent-secret or --agent-secret-path"
             ));
         }
     };
+    if agent_secret.is_empty() {
+        return Err(anyhow::anyhow!(
+            "Agent secret is empty. Provide it via --agent-secret or --agent-secret-path"
+        ));
+    }
 
     // Set up application state
     let state = AppState {
@@ -154,7 +162,7 @@ async fn main() -> Result<()> {
                 .delete(reset_service_config),
         )
         // Admin registry routes
-        .route("/api/admin/registry/search", get(search_infections))
+        .route("/api/admin/registry/find", get(find_infections))
         .route(
             "/api/admin/registry/infections/:name",
             get(get_infection_manifest),
@@ -163,6 +171,17 @@ async fn main() -> Result<()> {
             "/api/admin/registry/infections/:name/install",
             post(install_infection),
         )
+        // Admin deployment lifecycle routes
+        .route(
+            "/api/admin/deployments",
+            get(list_deployments).post(install_deployment),
+        )
+        .route(
+            "/api/admin/deployments/:name",
+            get(get_deployment).delete(remove_deployment),
+        )
+        // Audit log (phase 8): what the agent applied / removed, step by step
+        .route("/api/admin/audit", get(get_audit))
         .layer(from_fn_with_state(state.clone(), auth_middleware));
 
     // WebSocket route handles auth internally

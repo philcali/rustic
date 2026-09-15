@@ -71,6 +71,23 @@ journald) without host access or KVM, there is a systemd-in-docker template:
 see [`e2e/README.md`](e2e/README.md) for launch instructions and a full
 attach/detach walkthrough.
 
+## Deployments (Spec-Driven Install)
+
+Install software as declarative, templated specs — one infection, or a
+deployment of several wired together — with dry-run preview, drift-aware
+status, ownership-respecting removal, an audit log, and a web console:
+
+```bash
+pandemic-cli deployment install ./webapp/deployment.toml --dry-run
+sudo pandemic-cli deployment install ./webapp/deployment.toml
+sudo pandemic-cli deployment remove webapp --purge
+sudo pandemic-cli audit
+```
+
+Full how-to — spec anatomy, CLI/REST/console, registry publishing, state
+and ownership, rollback and `--purge` policy: see
+[`docs/deployments.md`](docs/deployments.md).
+
 ## CLI Management
 
 ```bash

@@ -43,7 +43,8 @@ pub async fn handle_agent_request(request: AgentRequest) -> Response {
         AgentRequest::GetCapabilities => {
             info!("Capabilities requested");
             Response::success_with_data(serde_json::json!({
-                "capabilities": ["systemd", "service_management", "user_management", "group_management", "service_config", "infection_registry"]
+                "capabilities": ["systemd", "service_management", "user_management", "group_management", "service_config", "infection_registry", "package_management", "file_management", "infection_lifecycle", "deployment_lifecycle"],
+                "package_managers": crate::packages::detect_package_managers()
             }))
         }
 
@@ -110,6 +111,9 @@ pub async fn handle_agent_request(request: AgentRequest) -> Response {
             info!("Systemd control: {} {}", action, service);
 
             let result = match action.as_str() {
+                "daemon-reload" => crate::systemd::daemon_reload()
+                    .await
+                    .map(|()| String::new()),
                 "start" | "stop" | "restart" | "enable" | "disable" | "status" => {
                     execute_systemctl(&action, &service).await
                 }
@@ -160,17 +164,6 @@ pub async fn handle_agent_request(request: AgentRequest) -> Response {
             match add_user_to_group(&username, &groupname).await {
                 Ok(_) => Response::success(),
                 Err(e) => Response::error(format!("Failed to add user to group: {}", e)),
-            }
-        }
-
-        AgentRequest::SearchInfections { query } => {
-            info!("Searching infections: {}", query);
-            let client = RegistryClient::new();
-            match client.search_infections(&query).await {
-                Ok(results) => Response::success_with_data(serde_json::json!({
-                    "infections": results
-                })),
-                Err(e) => Response::error(format!("Failed to search infections: {}", e)),
             }
         }
 
@@ -247,6 +240,147 @@ pub async fn handle_agent_request(request: AgentRequest) -> Response {
                 Ok(_) => Response::success(),
                 Err(e) => Response::error(format!("Failed to remove user from group: {}", e)),
             }
+        }
+
+        AgentRequest::PackageInstall { manager, packages } => {
+            info!("Installing packages via {manager}: {}", packages.join(", "));
+            match crate::packages::install_packages(&manager, &packages).await {
+                Ok(()) => Response::success(),
+                Err(e) => Response::error(format!("Package install failed: {e}")),
+            }
+        }
+
+        AgentRequest::WriteFile {
+            path,
+            content,
+            owner,
+            mode,
+        } => {
+            info!(
+                "Writing file {path} (owner {owner}, mode {mode}, {} bytes)",
+                content.len()
+            );
+            match crate::files::write_file(&path, &content, &owner, &mode).await {
+                Ok(()) => Response::success(),
+                Err(e) => Response::error(format!("WriteFile failed: {e}")),
+            }
+        }
+
+        AgentRequest::RecordInfection { name, state } => {
+            info!("Recording infection: {name} (version {})", state.version);
+            match crate::state::record_infection(&name, &state) {
+                Ok(()) => Response::success_with_data(serde_json::json!({ "name": name })),
+                Err(e) => Response::error(format!("Failed to record infection: {e}")),
+            }
+        }
+
+        AgentRequest::ListInfections => {
+            info!("Listing infections");
+            match crate::state::list_infections() {
+                Ok(infections) => Response::success_with_data(serde_json::json!({
+                    "infections": infections
+                })),
+                Err(e) => Response::error(format!("Failed to list infections: {e}")),
+            }
+        }
+
+        AgentRequest::GetInfectionStatus { name } => {
+            info!("Infection status: {name}");
+            if !crate::state::is_installed(&name) {
+                return Response::not_found(format!("infection '{name}' is not installed"));
+            }
+            match crate::state::infection_status(&name).await {
+                Ok(status) => Response::success_with_data(status),
+                Err(e) => Response::error(format!("Failed to read infection status: {e}")),
+            }
+        }
+
+        AgentRequest::UninstallInfection { name, purge } => {
+            info!("Uninstalling infection: {name} (purge: {purge})");
+            if !crate::state::is_installed(&name) {
+                return Response::not_found(format!("infection '{name}' is not installed"));
+            }
+            match crate::state::uninstall_infection(&name, purge).await {
+                Ok(result) => Response::success_with_data(result),
+                Err(e) => Response::error(format!("Failed to uninstall infection: {e}")),
+            }
+        }
+
+        AgentRequest::RecordDeployment { name, state } => {
+            info!(
+                "Recording deployment: {name} (version {}, {} infections)",
+                state.version,
+                state.infections.len()
+            );
+            match crate::deployments::record_deployment(&name, &state) {
+                Ok(()) => Response::success_with_data(serde_json::json!({ "name": name })),
+                Err(e) => Response::error(format!("Failed to record deployment: {e}")),
+            }
+        }
+
+        AgentRequest::ListDeployments => {
+            info!("Listing deployments");
+            match crate::deployments::list_deployments() {
+                Ok(deployments) => Response::success_with_data(serde_json::json!({
+                    "deployments": deployments
+                })),
+                Err(e) => Response::error(format!("Failed to list deployments: {e}")),
+            }
+        }
+
+        AgentRequest::GetDeploymentStatus { name } => {
+            info!("Deployment status: {name}");
+            if !crate::deployments::is_deployed(&name) {
+                return Response::not_found(format!("deployment '{name}' is not installed"));
+            }
+            match crate::deployments::deployment_status(&name).await {
+                Ok(status) => Response::success_with_data(status),
+                Err(e) => Response::error(format!("Failed to read deployment status: {e}")),
+            }
+        }
+
+        AgentRequest::RemoveDeployment { name, purge } => {
+            info!("Removing deployment: {name} (purge: {purge})");
+            if !crate::deployments::is_deployed(&name) {
+                return Response::not_found(format!("deployment '{name}' is not installed"));
+            }
+            match crate::deployments::remove_deployment(&name, purge).await {
+                Ok(result) => Response::success_with_data(result),
+                Err(e) => Response::error(format!("Failed to remove deployment: {e}")),
+            }
+        }
+
+        AgentRequest::ApplyInfection { plan, owner } => {
+            info!("Applying infection: {} (owner {:?})", plan.name, owner);
+            match crate::apply::apply_infection(&plan, owner.as_deref()).await {
+                Ok(result) => Response::success_with_data(result),
+                Err(e) => Response::error(format!("Failed to apply infection: {e}")),
+            }
+        }
+
+        AgentRequest::ApplyDeployment {
+            name,
+            version,
+            variables,
+            infections,
+        } => {
+            info!(
+                "Applying deployment: {name} (v{version}, {} infections)",
+                infections.len()
+            );
+            match crate::apply::apply_deployment(&name, &version, &variables, &infections).await {
+                Ok(result) => Response::success_with_data(result),
+                Err(e) => Response::error(format!("Failed to apply deployment: {e}")),
+            }
+        }
+
+        AgentRequest::PreviewInfection { plan } => {
+            info!("Previewing infection plan: {}", plan.name);
+            Response::success_with_data(crate::preview::preview_infection(&plan).await)
+        }
+        AgentRequest::PreviewDeployment { infections } => {
+            info!("Previewing deployment ({} infections)", infections.len());
+            Response::success_with_data(crate::preview::preview_deployment(&infections).await)
         }
     }
 }

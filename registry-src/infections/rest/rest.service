@@ -1,0 +1,12 @@
+[Unit]
+Description=Pandemic REST API
+After=network.target
+
+# Runs as root: it holds the agent secret (/etc/pandemic/agent-secret,
+# 0600 root-only), which is the credential for privileged agent operations.
+[Service]
+ExecStart=/usr/local/bin/pandemic-rest --socket-path {{ socket_path }} --port {{ port }} --auth-config /etc/pandemic/rest-auth.toml --agent-secret-path /etc/pandemic/agent-secret
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

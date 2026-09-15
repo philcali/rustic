@@ -244,6 +244,7 @@ section h3 {
   background: rgba(255, 68, 68, 0.1);
   border-radius: 4px;
   border: 1px solid rgba(255, 68, 68, 0.2);
+  white-space: pre-wrap;
 }
 
 @media (max-width: 768px) {
@@ -497,4 +498,224 @@ section h3 {
     white-space: pre-wrap;
     max-height: 300px;
     overflow-y: auto;
+}
+
+.deployment-item {
+    padding: 1rem;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.02);
+}
+
+.deployment-info {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    margin-bottom: 0.5rem;
+}
+
+.deployment-info strong {
+    color: var(--text-color);
+}
+
+.deployment-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem 1rem;
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    margin-bottom: 1rem;
+}
+
+.muted {
+    color: var(--text-muted);
+    font-size: 0.85rem;
+}
+
+.deployment-detail {
+    margin-top: 1rem;
+    padding: 1rem;
+    background: rgba(255, 255, 255, 0.02);
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+}
+
+.detail-block {
+    margin-bottom: 1rem;
+}
+
+.detail-block:last-child {
+    margin-bottom: 0;
+}
+
+.detail-block h4 {
+    margin: 0 0 0.5rem 0;
+    color: var(--primary-color);
+}
+
+.detail-infection {
+    padding: 0.75rem 0;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.detail-infection:last-child {
+    border-bottom: none;
+}
+
+.detail-infection > .deployment-info {
+    margin-bottom: 0.5rem;
+}
+
+.file-row {
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    white-space: pre-wrap;
+}
+/* Deployment install panel (two-step: preview plan, then apply) */
+.deployment-install {
+  padding: 1rem;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.02);
+  margin-bottom: 1rem;
+}
+
+.deployment-install h4 {
+  margin: 0 0 0.75rem 0;
+  color: var(--primary-color);
+}
+
+.install-source {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+
+.install-source input[type="text"] {
+  flex: 1;
+  min-width: 220px;
+  padding: 0.5rem;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background: var(--surface-color);
+  color: var(--text-color);
+}
+
+.install-source label {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+.install-vars-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.5rem;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+.var-row {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.var-row input {
+  padding: 0.4rem;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background: var(--surface-color);
+  color: var(--text-color);
+}
+
+.var-row .var-key {
+  width: 30%;
+  min-width: 120px;
+}
+
+.var-row .var-value {
+  flex: 1;
+}
+
+.var-row button {
+  padding: 0.25rem 0.6rem;
+}
+
+.install-actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}
+
+.plan-preview {
+  margin-top: 1rem;
+  padding: 1rem;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.3);
+}
+
+.plan-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-bottom: 0.75rem;
+}
+
+.plan-row {
+  display: flex;
+  gap: 0.75rem;
+  font-size: 0.85rem;
+  margin-bottom: 0.35rem;
+}
+
+.plan-row > span:last-child {
+  white-space: pre-wrap;
+}
+
+.plan-label {
+  min-width: 130px;
+  flex-shrink: 0;
+  color: var(--text-muted);
+}
+
+.plan-infection {
+  margin: 0.75rem 0;
+  padding: 0.75rem;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.plan-infection-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-bottom: 0.5rem;
+}
+
+.plan-diff {
+  margin-top: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  border-left: 3px solid var(--border-color);
+  background: rgba(255, 255, 255, 0.04);
+  border-radius: 0 4px 4px 0;
+  font-size: 0.85rem;
+}
+
+.plan-diff-head {
+  color: var(--text-muted);
+  margin-bottom: 0.25rem;
+}
+
+.plan-diff-row {
+  margin-bottom: 0.2rem;
 }

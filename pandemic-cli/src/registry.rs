@@ -4,12 +4,22 @@ use pandemic_common::RegistryClient;
 use std::path::PathBuf;
 use tracing::{error, info};
 
+/// Build a [`RegistryClient`] from an optional `--registry-url`, falling back
+/// to `PANDEMIC_REGISTRY_URL` / the built-in default. Shared by `registry
+/// install` and the `infection`/`deployment` by-name install paths.
+pub fn registry_client(registry_url: Option<String>) -> RegistryClient {
+    match registry_url {
+        Some(url) => RegistryClient::with_registry_url(url),
+        None => RegistryClient::new(),
+    }
+}
+
 pub async fn handle_registry_command(_socket_path: &PathBuf, action: RegistryAction) -> Result<()> {
     match action {
-        RegistryAction::Search {
+        RegistryAction::Find {
             query,
             registry_url,
-        } => search_infections(&query, registry_url).await,
+        } => find_infections(&query, registry_url).await,
         RegistryAction::Get { name, registry_url } => {
             get_infection_manifest(&name, registry_url).await
         }
@@ -19,11 +29,8 @@ pub async fn handle_registry_command(_socket_path: &PathBuf, action: RegistryAct
     }
 }
 
-async fn search_infections(query: &str, registry_url: Option<String>) -> Result<()> {
-    let registry = match registry_url {
-        Some(url) => RegistryClient::with_registry_url(url),
-        None => RegistryClient::new(),
-    };
+async fn find_infections(query: &str, registry_url: Option<String>) -> Result<()> {
+    let registry = registry_client(registry_url);
 
     info!("Searching for infections matching '{}'...", query);
 
@@ -54,10 +61,7 @@ async fn search_infections(query: &str, registry_url: Option<String>) -> Result<
 }
 
 async fn get_infection_manifest(name: &str, registry_url: Option<String>) -> Result<()> {
-    let registry = match registry_url {
-        Some(url) => RegistryClient::with_registry_url(url),
-        None => RegistryClient::new(),
-    };
+    let registry = registry_client(registry_url);
 
     info!("Getting manifest for infection '{}'...", name);
 
@@ -97,10 +101,7 @@ async fn get_infection_manifest(name: &str, registry_url: Option<String>) -> Res
 }
 
 async fn install_infection(name: &str, registry_url: Option<String>) -> Result<()> {
-    let registry = match registry_url {
-        Some(url) => RegistryClient::with_registry_url(url),
-        None => RegistryClient::new(),
-    };
+    let registry = registry_client(registry_url);
 
     info!("Installing infection '{}'...", name);
 

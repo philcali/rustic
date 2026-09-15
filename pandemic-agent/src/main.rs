@@ -1,6 +1,12 @@
+mod apply;
+mod deployments;
+mod files;
 mod handlers;
 mod infection;
+mod packages;
+mod preview;
 mod socket;
+mod state;
 mod systemd;
 mod users;
 

@@ -119,6 +119,65 @@ for component in "${CORE_COMPONENTS[@]}"; do
 EOF
 done
 
+# --- Spec / deployment atoms (registry-src/) → checksummed bundles + index ---
+# Each atom dir (registry-src/{infections,deployments}/<name>/) is tarred into
+# a single bundle with one sha256, published under registry/specs/. The index
+# entry uses `type` = infection-spec | deployment and points at bundle_url.
+# (Names are a single global namespace in the index — keep them unique across
+# binaries, infection-specs, and deployments.)
+SPEC_SRC="registry-src"
+SPEC_OUT="$REGISTRY_DIR/specs"
+if [ -d "$SPEC_SRC" ]; then
+  for kind in infections deployments; do
+    [ -d "$SPEC_SRC/$kind" ] || continue
+    mkdir -p "$SPEC_OUT/$kind"
+    for dir in "$SPEC_SRC/$kind"/*/; do
+      [ -d "$dir" ] || continue
+      name=$(basename "$dir")
+      if [ "$kind" = "infections" ]; then
+        spec_file="$dir/infection.toml"; type="infection-spec"
+      else
+        spec_file="$dir/deployment.toml"; type="deployment"
+      fi
+      if [ ! -f "$spec_file" ]; then
+        echo "WARN: $spec_file not found, skipping $kind/$name"
+        continue
+      fi
+
+      bundle="$SPEC_OUT/$kind/$name.tar.gz"
+      tar -czf "$bundle" -C "$SPEC_SRC/$kind" "$name"
+      checksum=$(sha256sum "$bundle" | cut -d' ' -f1)
+      # Relative to the registry base (<base>/registry/), so the client can
+      # resolve it against whatever base served the index (PANDEMIC_REGISTRY_URL
+      # / --registry-url). On the default registry this is the same absolute
+      # URL as before; on a mirror it tracks the mirror.
+      bundle_url="specs/$kind/$name.tar.gz"
+
+      version=$(grep -m1 '^version = ' "$spec_file" | sed 's/version = "\(.*\)"/\1/')
+      [ -n "$version" ] || version="$VERSION"
+      desc=$(grep -m1 '^description = ' "$spec_file" | sed 's/description = "\(.*\)"/\1/')
+      [ -n "$desc" ] || desc="$([ "$kind" = "infections" ] && echo "Infection spec: $name" || echo "Deployment: $name")"
+
+      if [ "$first_item" = false ]; then
+        echo "," >> "$REGISTRY_DIR/index.json"
+      fi
+      first_item=false
+
+      cat >> "$REGISTRY_DIR/index.json" << EOF
+    "$name": {
+      "name": "$name",
+      "latest_version": "$version",
+      "description": "$desc",
+      "type": "$type",
+      "bundle_url": "$bundle_url",
+      "checksum": "$checksum"
+    }
+EOF
+      echo "Generated bundle for $kind/$name ($checksum)"
+    done
+  done
+fi
+
 cat >> "$REGISTRY_DIR/index.json" << EOF
   }
 }

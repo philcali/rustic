@@ -1,0 +1,7 @@
+# Rendered by the `rest` infection.
+[identities.admin]
+api_key = "{{ api_key }}"
+roles = ["admin"]
+
+[roles.admin]
+scopes = ["admin", "health:read"]

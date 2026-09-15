@@ -1,0 +1,17 @@
+[infection]
+name = "mosquitto"
+version = "2.0"
+description = "MQTT broker (attached)"
+
+[variables]
+port = { default = "1883" }
+
+[files]
+"mosquitto.conf" = { target = "/etc/mosquitto/mosquitto.conf", owner = "mosquitto", mode = "0640" }
+
+[systemd]
+attach = "mosquitto.service"
+
+[health]
+check = ["systemctl", "is-active", "mosquitto"]
+interval = 15

@@ -1,0 +1,33 @@
+[infection]
+name = "rest"
+version = "0.4.0"
+description = "Pandemic REST API"
+
+[variables]
+socket_path  = { default = "/var/run/pandemic/pandemic.sock" }
+port         = { default = "8080" }
+bind_address = { default = "127.0.0.1" }
+# Bearer key for the REST API. Set a strong value at install time
+# (e.g. `--set api_key=...`); the default is a well-known placeholder.
+api_key      = { default = "pandemic-rest-default-change-me" }
+
+[groups]
+rest = {}
+
+[users]
+rest = { group = "rest", system = true }
+
+[files]
+"rest-auth.toml" = { target = "/etc/pandemic/rest-auth.toml", owner = "root", mode = "0600" }
+
+[systemd]
+unit_file = "rest.service"
+enable = true
+
+[health]
+check = [
+    "curl", "-sf",
+    "-H", "Authorization: Bearer {{ api_key }}",
+    "http://127.0.0.1:{{port}}/api/health",
+]
+interval = 15

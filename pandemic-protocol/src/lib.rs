@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 mod time_format {
     use chrono::{DateTime, Utc};
@@ -30,6 +30,13 @@ mod time_format {
         }
     }
 }
+
+/// Spec-driven install: infection and deployment specs (see
+/// `ideas/deployments.md`). Pure logic — parsing, validation, variable
+/// resolution, and `{{name}}` rendering.
+pub mod spec;
+
+use spec::{DeploymentState, InfectionState};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HealthMetrics {
@@ -137,9 +144,6 @@ pub enum AgentRequest {
     },
 
     // Registry operations
-    SearchInfections {
-        query: String,
-    },
     GetInfectionManifest {
         name: String,
     },
@@ -168,6 +172,124 @@ pub enum AgentRequest {
         /// infection name as created by AttachInfection
         name: String,
     },
+
+    // Spec-driven install primitives (ideas/deployments.md, phase 2)
+    PackageInstall {
+        /// package manager: one of `apt`, `dnf`, `pacman`, `apk`, `zypper`
+        manager: String,
+        /// package names to install
+        packages: Vec<String>,
+    },
+    WriteFile {
+        /// absolute host path (allowlisted; pandemic internals protected)
+        path: String,
+        /// file content
+        content: String,
+        /// owning user
+        owner: String,
+        /// file mode, e.g. "0600"
+        mode: String,
+    },
+
+    // Spec-driven infection lifecycle (ideas/deployments.md, phase 3)
+    /// Record the state of an installed infection (0600 root-only)
+    RecordInfection {
+        /// infection name
+        name: String,
+        /// the recorded state (variables, files + hashes, unit/attach, health)
+        state: InfectionState,
+    },
+    /// List installed infections (spec-driven state + legacy attach records)
+    ListInfections,
+    /// Status of one infection: recorded state + live unit/file checks
+    GetInfectionStatus {
+        /// infection name
+        name: String,
+    },
+    /// Uninstall an infection (reverse of install, driven by recorded state)
+    UninstallInfection {
+        /// infection name
+        name: String,
+        /// also delete the users/groups the state record says this
+        /// infection created (phase 8 `--purge`; default leaves them in
+        /// place — they may be shared)
+        #[serde(default)]
+        purge: bool,
+    },
+
+    // Spec-driven deployment lifecycle (ideas/deployments.md, phase 4)
+    /// Record the state of an installed deployment (0600 root-only)
+    RecordDeployment {
+        /// deployment name
+        name: String,
+        /// the recorded state (resolved shared variables, owned infections
+        /// in install order)
+        state: DeploymentState,
+    },
+    /// List installed deployments
+    ListDeployments,
+    /// Status of one deployment: recorded state + each owned infection's
+    /// live state (missing infections are reported, not an error)
+    GetDeploymentStatus {
+        /// deployment name
+        name: String,
+    },
+    /// Remove a deployment: uninstall its owned infections in reverse
+    /// order, then drop the record. Infections not owned by it are
+    /// left untouched.
+    RemoveDeployment {
+        /// deployment name
+        name: String,
+        /// also delete the users/groups the infection state records say
+        /// the deployment's infections created (phase 8 `--purge`; default
+        /// leaves them in place — they may be shared)
+        #[serde(default)]
+        purge: bool,
+    },
+
+    // Plan/Apply boundary (ideas/deployments.md, phase 5). The client does
+    // the pure `Plan` step (resolve, render, validate) and sends the
+    // concrete plan(s); the agent owns the privileged `Apply` step.
+    /// Apply a single concrete infection plan and record it. `owner` is
+    /// `None` for a standalone install, the deployment name when applied as
+    /// part of one (what makes `RemoveDeployment` precise).
+    ApplyInfection {
+        /// fully rendered infection plan
+        plan: Plan,
+        /// owning deployment name, or `None` for standalone
+        owner: Option<String>,
+    },
+    /// Apply a whole deployment: ownership pre-flight, then each infection
+    /// (in `infections` order) applied with this deployment as owner, then
+    /// the deployment record written. Mirrors [`AgentRequest::RemoveDeployment`].
+    ApplyDeployment {
+        /// deployment name
+        name: String,
+        /// deployment version (recorded)
+        version: String,
+        /// resolved shared variables (recorded)
+        variables: BTreeMap<String, String>,
+        /// per-infection record metadata + concrete plans, in install order
+        infections: Vec<ApplyDeploymentInfection>,
+    },
+
+    // Host preview / diff (ideas/deployments.md, phase 8). Read-only:
+    // reports what applying the plan(s) would change, without writing
+    // anything. The client merges the result into the redacted dry-run.
+    /// Preview one concrete plan against host state (zero writes): per-file
+    /// absent/unchanged/modified (by sha256), unit file + active state,
+    /// attach target active, groups/users present, the package manager this
+    /// host would use, and whether a state record already exists.
+    PreviewInfection {
+        /// the concrete plan to preview
+        plan: Plan,
+    },
+    /// Preview every infection of a deployment (same per-infection shape,
+    /// in the given order).
+    PreviewDeployment {
+        /// per-infection metadata + concrete plans, in install order
+        infections: Vec<ApplyDeploymentInfection>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -176,6 +298,124 @@ pub struct UserConfig {
     pub home_dir: Option<String>,
     pub groups: Option<Vec<String>>,
     pub system_user: Option<bool>,
+}
+
+/// A rendered file ready to write (rendered content + host placement).
+///
+/// Carried inside [`Plan`] so an `Apply*` request is fully concrete — the
+/// agent writes it as-is and never sees a template.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RenderedFile {
+    pub target: String,
+    pub content: String,
+    pub owner: String,
+    pub mode: String,
+}
+
+/// The unit an install owns, rendered to /etc/systemd/system/.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlanUnit {
+    pub name: String,
+    pub target: String,
+    pub content: String,
+    pub enable: bool,
+}
+
+/// The fully rendered, pre-flight plan for one infection install
+/// (ideas/deployments.md, phase 5 — the Plan/Apply boundary).
+///
+/// This is the *concrete* artifact of the pure `Plan` step: variables
+/// resolved, every template rendered, the unit/attach chosen. It is sent
+/// to the agent as an `ApplyInfection`/`ApplyDeployment` request, which
+/// executes it with its privileged primitives. `declared_packages` is the
+/// raw per-manager list — the agent picks the manager its own host supports.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Plan {
+    pub name: String,
+    pub version: String,
+    pub description: String,
+    pub variables: BTreeMap<String, String>,
+    pub files: Vec<RenderedFile>,
+    pub unit: Option<PlanUnit>,
+    pub attach: Option<String>,
+    pub health_check: Vec<String>,
+    pub health_interval: u64,
+    /// The spec's non-empty `[packages]` entries. The agent selects the
+    /// manager this host supports (see `spec::select_packages`).
+    pub declared_packages: BTreeMap<String, Vec<String>>,
+    pub groups: Vec<String>,
+    pub users: Vec<(String, UserConfig)>,
+}
+
+/// One infection inside [`AgentRequest::ApplyDeployment`]: its recorded
+/// metadata (name/version/order/source) plus the concrete [`Plan`] the agent
+/// will apply.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApplyDeploymentInfection {
+    pub name: String,
+    pub version: String,
+    pub order: u64,
+    pub source: String,
+    pub plan: Plan,
+}
+
+// ---------------------------------------------------------------------------
+// Dry-run previews (ideas/deployments.md, phase 8 — wire masking).
+//
+// The concrete [`Plan`] carries rendered contents, variable values, and the
+// health-check command — fine between CLI and agent (both trusted, host
+// local), but never sent to a browser: values may be secrets and the state
+// record is 0600 root-only. The `Preview*` types are the redacted wire form
+// a reviewer needs: names, targets, owners, modes, content hashes.
+// ---------------------------------------------------------------------------
+
+/// One rendered file, redacted: placement + content hash, never the content.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PreviewFile {
+    pub target: String,
+    pub owner: String,
+    pub mode: String,
+    /// sha256 of the rendered content — verifiable without revealing it.
+    pub sha256: String,
+}
+
+/// The owned unit, redacted: identity + enablement, never the content.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PreviewUnit {
+    pub name: String,
+    pub target: String,
+    pub enable: bool,
+    /// sha256 of the rendered unit content.
+    pub sha256: String,
+}
+
+/// The health check, redacted: whether one is configured and how often it
+/// runs — never the command (it may carry credentials).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PreviewHealth {
+    pub configured: bool,
+    pub interval: u64,
+}
+
+/// The redacted wire form of a [`Plan`]: everything a reviewer needs to
+/// approve an install (names, target paths, owners, modes, hashes, packages,
+/// groups, user names, variable names, health interval) without the secret
+/// parts (variable values, file/unit contents, the health command).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlanPreview {
+    pub name: String,
+    pub version: String,
+    pub description: String,
+    pub files: Vec<PreviewFile>,
+    pub unit: Option<PreviewUnit>,
+    pub attach: Option<String>,
+    pub health: PreviewHealth,
+    pub declared_packages: BTreeMap<String, Vec<String>>,
+    pub groups: Vec<String>,
+    /// User names only (no config).
+    pub users: Vec<String>,
+    /// Variable names only (never values).
+    pub variable_names: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -474,6 +714,146 @@ mod tests {
     }
 
     #[test]
+    fn test_infection_lifecycle_request_roundtrips() {
+        use spec::{InfectionRecordedFile, InfectionState};
+
+        let state = InfectionState {
+            name: "rest".to_string(),
+            version: "0.4.0".to_string(),
+            description: "Pandemic REST API".to_string(),
+            variables: {
+                let mut m = std::collections::BTreeMap::new();
+                m.insert("port".to_string(), "8080".to_string());
+                m
+            },
+            groups: vec!["rest".to_string()],
+            users: vec!["rest".to_string()],
+            files: vec![InfectionRecordedFile {
+                target: "/etc/pandemic/rest-auth.toml".to_string(),
+                sha256: "abc123".to_string(),
+                owner: "root".to_string(),
+                mode: "0600".to_string(),
+            }],
+            unit: Some("rest".to_string()),
+            attach: None,
+            health_check: vec!["curl".to_string(), "-sf".to_string()],
+            health_interval: 15,
+            installed_at: None,
+            owner: None,
+        };
+
+        let request = AgentRequest::RecordInfection {
+            name: "rest".to_string(),
+            state: state.clone(),
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains(r#""type":"RecordInfection""#));
+        let back: AgentRequest = serde_json::from_str(&json).unwrap();
+        match back {
+            AgentRequest::RecordInfection { name, state } => {
+                assert_eq!(name, "rest");
+                assert_eq!(state, state);
+            }
+            other => panic!("Expected RecordInfection, got {other:?}"),
+        }
+
+        for (req, tag) in [
+            (AgentRequest::ListInfections, r#""type":"ListInfections""#),
+            (
+                AgentRequest::GetInfectionStatus {
+                    name: "rest".to_string(),
+                },
+                r#""type":"GetInfectionStatus""#,
+            ),
+            (
+                AgentRequest::UninstallInfection {
+                    name: "rest".to_string(),
+                    purge: false,
+                },
+                r#""type":"UninstallInfection""#,
+            ),
+            (
+                AgentRequest::UninstallInfection {
+                    name: "rest".to_string(),
+                    purge: true,
+                },
+                r#""type":"UninstallInfection""#,
+            ),
+        ] {
+            let json = serde_json::to_string(&req).unwrap();
+            assert!(json.contains(tag), "missing {tag} in {json}");
+            let back: AgentRequest = serde_json::from_str(&json).unwrap();
+            assert_eq!(serde_json::to_string(&back).unwrap(), json);
+        }
+    }
+
+    #[test]
+    fn test_deployment_lifecycle_request_roundtrips() {
+        use spec::{DeploymentRecordedInfection, DeploymentState};
+
+        let state = DeploymentState {
+            name: "rest-stack".to_string(),
+            version: "1.2.0".to_string(),
+            variables: {
+                let mut m = std::collections::BTreeMap::new();
+                m.insert("port".to_string(), "8080".to_string());
+                m
+            },
+            infections: vec![DeploymentRecordedInfection {
+                name: "rest".to_string(),
+                version: "0.4.0".to_string(),
+                order: 1,
+                source: "rest/infection.toml".to_string(),
+            }],
+            installed_at: None,
+        };
+
+        let request = AgentRequest::RecordDeployment {
+            name: "rest-stack".to_string(),
+            state: state.clone(),
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains(r#""type":"RecordDeployment""#));
+        let back: AgentRequest = serde_json::from_str(&json).unwrap();
+        match back {
+            AgentRequest::RecordDeployment { name, state } => {
+                assert_eq!(name, "rest-stack");
+                assert_eq!(state, state);
+            }
+            other => panic!("Expected RecordDeployment, got {other:?}"),
+        }
+
+        for (req, tag) in [
+            (AgentRequest::ListDeployments, r#""type":"ListDeployments""#),
+            (
+                AgentRequest::GetDeploymentStatus {
+                    name: "rest-stack".to_string(),
+                },
+                r#""type":"GetDeploymentStatus""#,
+            ),
+            (
+                AgentRequest::RemoveDeployment {
+                    name: "rest-stack".to_string(),
+                    purge: false,
+                },
+                r#""type":"RemoveDeployment""#,
+            ),
+            (
+                AgentRequest::RemoveDeployment {
+                    name: "rest-stack".to_string(),
+                    purge: true,
+                },
+                r#""type":"RemoveDeployment""#,
+            ),
+        ] {
+            let json = serde_json::to_string(&req).unwrap();
+            assert!(json.contains(tag), "missing {tag} in {json}");
+            let back: AgentRequest = serde_json::from_str(&json).unwrap();
+            assert_eq!(serde_json::to_string(&back).unwrap(), json);
+        }
+    }
+
+    #[test]
     fn test_timestamp_serialization_roundtrip() {
         let original_time = Utc::now();
         let plugin = PluginInfo {
@@ -499,5 +879,45 @@ mod tests {
             diff.as_secs() <= 1,
             "Timestamp mismatch: original={original_time}, deserialized={deserialized_time}"
         );
+    }
+
+    #[test]
+    fn test_plan_preview_serialization_roundtrip() {
+        let preview = PlanPreview {
+            name: "rest".to_string(),
+            version: "1.2.3".to_string(),
+            description: "REST API".to_string(),
+            files: vec![PreviewFile {
+                target: "/etc/pandemic/rest/rest-auth.toml".to_string(),
+                owner: "pandemic".to_string(),
+                mode: "0600".to_string(),
+                sha256: "a".repeat(64),
+            }],
+            unit: Some(PreviewUnit {
+                name: "pandemic-rest".to_string(),
+                target: "/etc/systemd/system/pandemic-rest.service".to_string(),
+                enable: true,
+                sha256: "b".repeat(64),
+            }),
+            attach: None,
+            health: PreviewHealth {
+                configured: true,
+                interval: 30,
+            },
+            declared_packages: BTreeMap::from([("apt".to_string(), vec!["curl".to_string()])]),
+            groups: vec!["pandemic".to_string()],
+            users: vec!["pandemic".to_string()],
+            variable_names: vec!["api_key".to_string(), "listen_port".to_string()],
+        };
+
+        let json = serde_json::to_string(&preview).unwrap();
+        let back: PlanPreview = serde_json::from_str(&json).unwrap();
+        assert_eq!(json, serde_json::to_string(&back).unwrap());
+        assert_eq!(back.users, vec!["pandemic".to_string()]);
+        assert_eq!(
+            back.variable_names,
+            vec!["api_key".to_string(), "listen_port".to_string()]
+        );
+        assert_eq!(back.files[0].sha256, "a".repeat(64));
     }
 }

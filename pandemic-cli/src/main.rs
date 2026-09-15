@@ -1,6 +1,10 @@
 mod agent;
+mod apply;
+mod audit;
 mod bootstrap;
 mod daemon;
+mod deployment;
+mod infection;
 mod registry;
 mod secret;
 mod service;
@@ -48,12 +52,106 @@ enum Commands {
         #[command(subcommand)]
         action: RegistryAction,
     },
+    /// Spec-driven infection lifecycle (install / status / uninstall)
+    Infection {
+        /// agent shared secret (overrides the default path)
+        #[arg(long)]
+        agent_secret: Option<String>,
+        /// path to the agent shared secret
+        #[arg(long)]
+        agent_secret_path: Option<PathBuf>,
+        #[command(subcommand)]
+        action: InfectionAction,
+    },
+    /// Show the host audit log (what the agent applied / removed, and how)
+    Audit {
+        /// Number of most recent entries to show
+        #[arg(long, default_value = "20")]
+        limit: usize,
+        /// Raw JSON instead of the summary table
+        #[arg(long)]
+        json: bool,
+    },
+    /// Spec-driven deployment lifecycle (install / list / status / remove)
+    Deployment {
+        /// agent shared secret (overrides the default path)
+        #[arg(long)]
+        agent_secret: Option<String>,
+        /// path to the agent shared secret
+        #[arg(long)]
+        agent_secret_path: Option<PathBuf>,
+        #[command(subcommand)]
+        action: DeploymentAction,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum InfectionAction {
+    /// Install an infection from a spec file or a registry name
+    Install {
+        /// Path to the infection spec (spec.toml), or a registry infection-spec name
+        target: String,
+        /// Registry URL to use (when installing by name)
+        #[arg(long)]
+        registry_url: Option<String>,
+        /// Variable values: --set key=value (repeatable)
+        #[arg(long = "set")]
+        set: Vec<String>,
+    },
+    /// List installed infections, or show one in detail
+    Status {
+        /// Infection name (omit to list all)
+        name: Option<String>,
+    },
+    /// Uninstall an infection (reverse of `infection install`)
+    Uninstall {
+        /// Infection name
+        name: String,
+        /// Also delete the users/groups this infection created (default
+        /// leaves them in place — they may be shared)
+        #[arg(long)]
+        purge: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum DeploymentAction {
+    /// Render and apply a deployment spec (installs its infections in order)
+    Install {
+        /// Path to the deployment spec (deployment.toml), or a registry deployment name
+        target: String,
+        /// Registry URL to use (when installing by name)
+        #[arg(long)]
+        registry_url: Option<String>,
+        /// Shared variable values: --set key=value (repeatable)
+        #[arg(long = "set")]
+        set: Vec<String>,
+        /// Print the resolved plan without touching the agent
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// List installed deployments
+    List,
+    /// Show state for one deployment, or all deployments when omitted
+    Status {
+        /// Deployment name (omit to list all)
+        name: Option<String>,
+    },
+    /// Uninstall a deployment's infections in reverse install order
+    Remove {
+        /// Deployment name
+        name: String,
+        /// Also delete the users/groups the deployment's infections created
+        /// (default leaves them in place — they may be shared)
+        #[arg(long)]
+        purge: bool,
+    },
 }
 
 #[derive(Subcommand)]
 enum RegistryAction {
-    /// Search for infections in the registry
-    Search {
+    /// Find infections (and other registry atoms) by name or description
+    Find {
         /// Search query
         query: String,
         /// Registry URL to use
@@ -139,6 +237,17 @@ enum AgentAction {
     Restart,
     /// Show pandemic agent service status
     Status,
+    /// Send a raw AgentRequest as JSON (dev/e2e aid, e.g. `{"type":"GetCapabilities"}`)
+    Request {
+        /// AgentRequest JSON, tagged with "type"
+        json: String,
+        /// agent shared secret (overrides the default path)
+        #[arg(long)]
+        agent_secret: Option<String>,
+        /// path to the agent shared secret
+        #[arg(long)]
+        agent_secret_path: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -247,10 +356,21 @@ async fn main() -> Result<()> {
         }
         Commands::Service { action } => service::handle_service_command(action).await?,
         Commands::Bootstrap { action } => bootstrap::handle_bootstrap_command(action)?,
-        Commands::Agent { action } => agent::handle_agent_command(action)?,
+        Commands::Agent { action } => agent::handle_agent_command(action).await?,
         Commands::Registry { action } => {
             registry::handle_registry_command(&args.socket_path, action).await?
         }
+        Commands::Infection {
+            agent_secret,
+            agent_secret_path,
+            action,
+        } => infection::handle_infection_command(action, agent_secret, agent_secret_path).await?,
+        Commands::Deployment {
+            agent_secret,
+            agent_secret_path,
+            action,
+        } => deployment::handle_deployment_command(action, agent_secret, agent_secret_path).await?,
+        Commands::Audit { limit, json } => audit::handle_audit_command(limit, json)?,
     }
 
     Ok(())

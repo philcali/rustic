@@ -14,7 +14,7 @@ export async function searchInfections(apiBase, apiKey, container) {
     container.innerHTML = '<div class="loading">Searching infections...</div>';
 
     try {
-        const result = await apiRequest(apiBase, apiKey, `/api/admin/registry/search?q=${encodeURIComponent(query)}`);
+        const result = await apiRequest(apiBase, apiKey, `/api/admin/registry/find?q=${encodeURIComponent(query)}`);
         const infections = result.data?.infections || [];
 
         if (infections.length === 0) {
@@ -105,7 +105,7 @@ export async function installInfection(infectionName, apiBase, apiKey, reloadPlu
             body: JSON.stringify({}),
         });
 
-        if (result.status === 'Success') {
+        if (result.status === 'success') {
             alert(`Successfully installed ${infectionName}`);
             reloadPlugins();
         } else {

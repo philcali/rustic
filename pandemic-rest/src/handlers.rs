@@ -5,13 +5,13 @@ use axum::{
     response::Json,
     Extension,
 };
-use pandemic_common::{AgentClient, AgentStatus, DaemonClient};
+use pandemic_common::{AgentClient, AgentStatus, DaemonClient, RegistryClient};
 use pandemic_protocol::{
     AgentRequest, Request, Response as PandemicResponse, ServiceOverrides, UserConfig,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -118,7 +118,8 @@ pub async fn get_admin_capabilities(
     };
 
     if needs_refresh {
-        let new_status = AgentStatus::refresh().await;
+        let client = AgentClient::new().with_secret(&state.agent_secret);
+        let new_status = AgentStatus::refresh(&client).await;
         let mut agent_status = state.agent_status.lock().unwrap();
         *agent_status = new_status;
     }
@@ -363,7 +364,12 @@ pub async fn reset_service_config(
     format_pandemic_response(response.await)
 }
 // Registry handlers
-pub async fn search_infections(
+//
+// `find` is a pure, read-only search and is consistent with the CLI
+// (`pandemic-cli registry find`): it resolves client-side against the registry
+// directly rather than round-tripping through the agent, which adds no value
+// for a lookup. `?registry_url=` mirrors the CLI `--registry-url` flag.
+pub async fn find_infections(
     State(state): State<AppState>,
     Query(params): Query<HashMap<String, String>>,
     Extension(scopes): Extension<Vec<String>>,
@@ -371,10 +377,19 @@ pub async fn search_infections(
     require_scope!(&state.auth_config, &scopes, "admin");
 
     let query = params.get("q").unwrap_or(&String::new()).clone();
-    let request = AgentRequest::SearchInfections { query };
-    let agent_client = AgentClient::new().with_secret(&state.agent_secret);
-    let response = agent_client.send_agent_request(&request);
-    format_pandemic_response(response.await)
+    let client = match params.get("registry_url") {
+        Some(url) => RegistryClient::with_registry_url(url.clone()),
+        None => RegistryClient::new(),
+    };
+    // `search_infections` swallows fetch errors and returns an empty list when
+    // the registry is unreachable, so this stays a 200 (possibly-empty) result.
+    let infections = client.search_infections(&query).await.unwrap_or_default();
+    Ok(Json(json!({
+        "status": "success",
+        "data": {
+            "infections": infections
+        }
+    })))
 }
 
 pub async fn get_infection_manifest(
@@ -410,4 +425,255 @@ pub async fn install_infection(
     let agent_client = AgentClient::new().with_secret(&state.agent_secret);
     let response = agent_client.send_agent_request(&request);
     format_pandemic_response(response.await)
+}
+
+// Deployment lifecycle handlers (ideas/deployments.md, phase 4).
+//
+// The pure `Plan` step (resolve + render + validate) lives in the shared
+// `pandemic_common::apply` builder, so the REST API drives the identical
+// plan the CLI does; the agent runs the privileged `Apply` step.
+
+pub async fn list_deployments(
+    State(state): State<AppState>,
+    Extension(scopes): Extension<Vec<String>>,
+) -> ApiResult {
+    require_scope!(&state.auth_config, &scopes, "admin");
+
+    let request = AgentRequest::ListDeployments;
+    let agent_client = AgentClient::new().with_secret(&state.agent_secret);
+    let response = agent_client.send_agent_request(&request);
+    format_pandemic_response(response.await)
+}
+
+pub async fn get_deployment(
+    Path(name): Path<String>,
+    State(state): State<AppState>,
+    Extension(scopes): Extension<Vec<String>>,
+) -> ApiResult {
+    require_scope!(&state.auth_config, &scopes, "admin");
+
+    let request = AgentRequest::GetDeploymentStatus { name };
+    let agent_client = AgentClient::new().with_secret(&state.agent_secret);
+    let response = agent_client.send_agent_request(&request);
+    format_pandemic_response(response.await)
+}
+
+#[derive(Deserialize)]
+pub struct RemoveQuery {
+    /// Also delete the users/groups the deployment's infections created
+    /// (`?purge=true`; default leaves them in place — they may be shared).
+    #[serde(default)]
+    pub purge: bool,
+}
+
+pub async fn remove_deployment(
+    Path(name): Path<String>,
+    State(state): State<AppState>,
+    Extension(scopes): Extension<Vec<String>>,
+    Query(params): Query<RemoveQuery>,
+) -> ApiResult {
+    require_scope!(&state.auth_config, &scopes, "admin");
+
+    let request = AgentRequest::RemoveDeployment {
+        name,
+        purge: params.purge,
+    };
+    let agent_client = AgentClient::new().with_secret(&state.agent_secret);
+    let response = agent_client.send_agent_request(&request);
+    format_pandemic_response(response.await)
+}
+
+#[derive(Deserialize)]
+pub struct AuditQuery {
+    /// How many most recent entries to return (oldest → newest).
+    #[serde(default = "default_audit_limit")]
+    pub limit: usize,
+}
+
+fn default_audit_limit() -> usize {
+    50
+}
+
+/// `GET /api/admin/audit?limit=N` — the host audit log (phase 8): what the
+/// agent applied / uninstalled / removed, step by step. The log lives on
+/// disk (0600 root), so the agent writes it; REST only reads it back.
+pub async fn get_audit(
+    State(state): State<AppState>,
+    Extension(scopes): Extension<Vec<String>>,
+    Query(params): Query<AuditQuery>,
+) -> ApiResult {
+    require_scope!(&state.auth_config, &scopes, "admin");
+
+    let limit = params.limit.clamp(1, 500);
+    match pandemic_common::audit::read_last(limit) {
+        Ok(entries) => Ok(Json(json!({
+            "status": "success",
+            "data": { "entries": entries, "count": entries.len() }
+        }))),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"status": "error", "message": e.to_string()})),
+        )),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct DeploymentInstallPayload {
+    /// Registry deployment name (by-name install; its infection-spec atoms are
+    /// pulled from the same registry). Mutually exclusive with `path`.
+    #[serde(default)]
+    name: Option<String>,
+    /// Path to a local deployment spec (`deployment.toml`). Mutually exclusive
+    /// with `name`.
+    #[serde(default)]
+    path: Option<String>,
+    /// Variable overrides (like the CLI `--set`); defaults to the spec's.
+    #[serde(default)]
+    vars: BTreeMap<String, String>,
+    /// Registry URL to use for a by-name install (overrides the default).
+    #[serde(default)]
+    registry_url: Option<String>,
+    /// When true, return the resolved plan without applying — redacted:
+    /// names, targets, owners, modes, content hashes; never values, file
+    /// contents, or the health command.
+    #[serde(default)]
+    dry_run: bool,
+}
+
+/// Attach the agent's per-infection diff to the dry-run payload (phase 8):
+/// each `data.infections[i]` gets a `diff` object, matched by name.
+fn merge_diff_into_preview(data: &mut Value, diff: &Value) {
+    let Some(diff_infections) = diff.get("infections").and_then(Value::as_array) else {
+        return;
+    };
+    let Some(infections) = data.get_mut("infections").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for infection in infections {
+        let Some(name) = infection.get("name").and_then(Value::as_str) else {
+            continue;
+        };
+        if let Some(matched) = diff_infections
+            .iter()
+            .find(|d| d.get("name").and_then(Value::as_str) == Some(name))
+        {
+            infection["diff"] = matched.clone();
+        }
+    }
+}
+
+/// `POST /api/admin/deployments` — the Plan/Apply consolidation.
+///
+/// Builds the concrete deployment plan (resolve + render + validate) from
+/// either a registry `name` (fetch + sha256-verify + extract) or a local spec
+/// `path` (offline), then either returns it (dry-run) or hands the concrete
+/// plans to the agent to apply: ownership pre-flight, each infection in
+/// `order`, then the record.
+pub async fn install_deployment(
+    State(state): State<AppState>,
+    Extension(scopes): Extension<Vec<String>>,
+    Json(payload): Json<DeploymentInstallPayload>,
+) -> ApiResult {
+    require_scope!(&state.auth_config, &scopes, "admin");
+
+    let build: anyhow::Result<pandemic_common::DeploymentPlan> = match (payload.name, payload.path)
+    {
+        (Some(name), _) => {
+            let client = match payload.registry_url {
+                Some(url) => pandemic_common::RegistryClient::with_registry_url(url),
+                None => pandemic_common::RegistryClient::new(),
+            };
+            pandemic_common::resolve_deployment_target(&client, &name, &payload.vars).await
+        }
+        (None, Some(path)) => {
+            pandemic_common::build_deployment_plan(std::path::Path::new(&path), &payload.vars)
+        }
+        (None, None) => Err(anyhow::anyhow!(
+            "provide either a registry 'name' or a local spec 'path'"
+        )),
+    };
+
+    let dp = match build {
+        Ok(dp) => dp,
+        Err(e) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({"status": "error", "message": e.to_string()})),
+            ))
+        }
+    };
+
+    // Dry-run: return the *redacted* plan (phase 8). Variable values,
+    // rendered file/unit contents, and the health-check command never leave
+    // the host — only names, targets, owners, modes, and content hashes.
+    if payload.dry_run {
+        let mut data = pandemic_common::deployment_preview_data(&dp);
+        // Best-effort host diff (phase 8): what applying would change.
+        // Omitted when the agent is unreachable, so an offline dry-run
+        // (reviewing a spec with no host) still succeeds.
+        let agent_client = AgentClient::new().with_secret(&state.agent_secret);
+        let request = AgentRequest::PreviewDeployment {
+            infections: pandemic_common::deployment_apply_infections(&dp),
+        };
+        if let Ok(PandemicResponse::Success { data: Some(diff) }) =
+            agent_client.send_agent_request(&request).await
+        {
+            merge_diff_into_preview(&mut data, &diff);
+        }
+        return Ok(Json(json!({ "status": "success", "data": data })));
+    }
+
+    let request = AgentRequest::ApplyDeployment {
+        name: dp.spec.meta.name.clone(),
+        version: dp.spec.meta.version.clone(),
+        variables: dp.shared.clone(),
+        infections: pandemic_common::deployment_apply_infections(&dp),
+    };
+    let agent_client = AgentClient::new().with_secret(&state.agent_secret);
+    let response = agent_client.send_agent_request(&request);
+    format_pandemic_response(response.await)
+}
+
+#[cfg(test)]
+mod merge_diff_tests {
+    use super::merge_diff_into_preview;
+    use serde_json::json;
+
+    #[test]
+    fn merges_matching_infections_by_name() {
+        let mut data = json!({
+            "name": "web-tier",
+            "infections": [
+                { "name": "alpha", "order": 1 },
+                { "name": "beta", "order": 2 }
+            ]
+        });
+        let diff = json!({
+            "infections": [
+                { "name": "beta", "files": [] },
+                { "name": "alpha", "files": [] }
+            ]
+        });
+        merge_diff_into_preview(&mut data, &diff);
+        let infections = data["infections"].as_array().unwrap();
+        assert!(infections[0]["diff"]["files"].is_array());
+        assert_eq!(infections[0]["diff"]["files"].as_array().unwrap().len(), 0);
+        assert!(infections[1]["diff"]["files"].is_array());
+    }
+
+    #[test]
+    fn unmatched_infections_and_malformed_shapes_are_noops() {
+        let mut data = json!({ "infections": [ { "name": "alpha" } ] });
+        // diff names don't match -> no diff attached
+        merge_diff_into_preview(&mut data, &json!({ "infections": [ { "name": "other" } ] }));
+        assert!(data["infections"][0].get("diff").is_none());
+        // malformed diff -> untouched
+        let mut data = json!({ "infections": [ { "name": "alpha" } ] });
+        merge_diff_into_preview(&mut data, &json!({ "not_infections": [] }));
+        assert!(data["infections"][0].get("diff").is_none());
+        // malformed data -> no panic
+        let mut data = json!({ "infections": "scalar" });
+        merge_diff_into_preview(&mut data, &json!({ "infections": [] }));
+        assert_eq!(data["infections"], "scalar");
+    }
 }

@@ -1,0 +1,20 @@
+[deployment]
+name = "rest-mqtt"
+version = "0.4.0"
+
+[variables]
+host = "127.0.0.1"
+mqtt_port = "1883"
+rest_port = "8080"
+
+[[infections]]
+name = "mosquitto"
+source = "mosquitto"
+order = 1
+vars = { port = "{{ mqtt_port }}" }
+
+[[infections]]
+name = "rest"
+source = "rest"
+order = 2
+vars = { port = "{{ rest_port }}", bind_address = "{{ host }}" }
