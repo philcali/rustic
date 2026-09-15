@@ -18,7 +18,7 @@ use chrono::Utc;
 use pandemic_protocol::spec::DeploymentState;
 
 use crate::infection::{validate_infection_name, INFECTIONS_DIR};
-use crate::state::{infection_status_in, is_installed_in, uninstall_owned_infection_in};
+use crate::state::{infection_status_in, is_installed_in};
 
 /// Where deployment records live on the host.
 pub const DEPLOYMENTS_DIR: &str = "/etc/pandemic/deployments";
@@ -156,8 +156,8 @@ pub async fn deployment_status_in(
 }
 
 /// Remove a deployment under the default roots.
-pub async fn remove_deployment(name: &str) -> Result<serde_json::Value> {
-    remove_deployment_in(DEPLOYMENTS_DIR, INFECTIONS_DIR, name).await
+pub async fn remove_deployment(name: &str, purge: bool) -> Result<serde_json::Value> {
+    remove_deployment_in(DEPLOYMENTS_DIR, INFECTIONS_DIR, name, purge).await
 }
 
 /// Remove deployment `name`: uninstall its owned infections in **reverse**
@@ -169,6 +169,10 @@ pub async fn remove_deployment(name: &str) -> Result<serde_json::Value> {
 /// - the infection is standalone, or owned by another deployment → skip
 ///   with a note; it is never touched.
 ///
+/// With `purge` (phase 8), each uninstalled infection also deletes the
+/// users/groups its own state record says it created; groups with remaining
+/// members are reported, never force-removed.
+///
 /// If any uninstall fails, the deployment record is **kept** (so
 /// `deployment remove` can be re-run — already-removed infections are skipped
 /// as missing) and `record_removed` is false.
@@ -176,10 +180,11 @@ pub async fn remove_deployment_in(
     dep_root: &str,
     inf_root: &str,
     name: &str,
+    purge: bool,
 ) -> Result<serde_json::Value> {
     // Audit (ideas/deployments.md, phase 8): which infections were removed,
-    // skipped (and why), or failed.
-    match remove_deployment_body(dep_root, inf_root, name).await {
+    // skipped (and why), or failed — plus any purged identity.
+    match remove_deployment_body(dep_root, inf_root, name, purge).await {
         Ok(result) => {
             let outcome = if result.get("record_removed") == Some(&serde_json::Value::Bool(true)) {
                 "ok"
@@ -191,9 +196,12 @@ pub async fn remove_deployment_in(
                 "event": "remove_deployment",
                 "name": name,
                 "outcome": outcome,
+                "purge": purge,
                 "removed": result.get("removed").cloned(),
                 "skipped": result.get("skipped").cloned(),
                 "failed": result.get("failed").cloned(),
+                "removed_users": result.get("removed_users").cloned(),
+                "removed_groups": result.get("removed_groups").cloned(),
                 "record_removed": result.get("record_removed").cloned(),
                 "notes": result.get("notes").cloned(),
             }));
@@ -204,6 +212,7 @@ pub async fn remove_deployment_in(
                 "ts": pandemic_common::audit::now_rfc3339(),
                 "event": "remove_deployment",
                 "name": name,
+                "purge": purge,
                 "outcome": "failed",
                 "error": e.to_string(),
             }));
@@ -216,6 +225,7 @@ async fn remove_deployment_body(
     dep_root: &str,
     inf_root: &str,
     name: &str,
+    purge: bool,
 ) -> Result<serde_json::Value> {
     let state = load_deployment_in(dep_root, name)?;
 
@@ -223,6 +233,8 @@ async fn remove_deployment_body(
     let mut skipped = Vec::new();
     let mut failed = Vec::new();
     let mut notes = Vec::new();
+    let mut removed_users = Vec::new();
+    let mut removed_groups = Vec::new();
 
     for inf in state.infections.iter().rev() {
         if !is_installed_in(inf_root, &inf.name) {
@@ -248,13 +260,29 @@ async fn remove_deployment_body(
 
         match inf_state.owner.as_deref() {
             Some(owner) if owner == name => {
-                match uninstall_owned_infection_in(inf_root, &inf.name).await {
+                match crate::state::uninstall_owned_infection_in(inf_root, &inf.name, purge).await {
                     Ok(result) => {
                         removed.push(inf.name.clone());
                         if let Some(inf_notes) = result.get("notes").and_then(|v| v.as_array()) {
                             for n in inf_notes {
                                 if let Some(n) = n.as_str() {
                                     notes.push(format!("{}: {n}", inf.name));
+                                }
+                            }
+                        }
+                        for key in ["removed_users", "removed_groups"] {
+                            let target = if key == "removed_users" {
+                                &mut removed_users
+                            } else {
+                                &mut removed_groups
+                            };
+                            if let Some(values) = result.get(key).and_then(|v| v.as_array()) {
+                                for v in values {
+                                    if let Some(v) = v.as_str() {
+                                        if !target.iter().any(|t| t == v) {
+                                            target.push(v.to_string());
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -295,6 +323,9 @@ async fn remove_deployment_body(
         "skipped": skipped,
         "failed": failed,
         "notes": notes,
+        "purge": purge,
+        "removed_users": removed_users,
+        "removed_groups": removed_groups,
         "record_removed": record_removed,
     }))
 }
@@ -502,7 +533,7 @@ mod tests {
 
         record_deployment_in(&dep, "rest-stack", &sample_state("rest-stack")).unwrap();
 
-        let result = remove_deployment_in(&dep, &inf, "rest-stack")
+        let result = remove_deployment_in(&dep, &inf, "rest-stack", false)
             .await
             .unwrap();
         assert_eq!(result["removed"][0], "rest-metrics");
@@ -549,7 +580,7 @@ mod tests {
 
         record_deployment_in(&dep, "rest-stack", &sample_state("rest-stack")).unwrap();
 
-        let result = remove_deployment_in(&dep, &inf, "rest-stack")
+        let result = remove_deployment_in(&dep, &inf, "rest-stack", false)
             .await
             .unwrap();
         assert!(result["removed"].as_array().unwrap().is_empty());
@@ -583,7 +614,7 @@ mod tests {
 
         record_deployment_in(&dep, "rest-stack", &sample_state("rest-stack")).unwrap();
 
-        let result = remove_deployment_in(&dep, &inf, "rest-stack")
+        let result = remove_deployment_in(&dep, &inf, "rest-stack", false)
             .await
             .unwrap();
         assert_eq!(result["skipped"].as_array().unwrap().len(), 2);
@@ -597,7 +628,9 @@ mod tests {
     async fn remove_unknown_errors() {
         let dep = temp_root("remove-unknown");
         let inf = temp_root("remove-unknown-inf");
-        let err = remove_deployment_in(&dep, &inf, "ghost").await.unwrap_err();
+        let err = remove_deployment_in(&dep, &inf, "ghost", false)
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("not installed"));
         cleanup(&dep);
         cleanup(&inf);

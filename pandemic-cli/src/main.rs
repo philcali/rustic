@@ -107,6 +107,10 @@ pub enum InfectionAction {
     Uninstall {
         /// Infection name
         name: String,
+        /// Also delete the users/groups this infection created (default
+        /// leaves them in place — they may be shared)
+        #[arg(long)]
+        purge: bool,
     },
 }
 
@@ -137,6 +141,10 @@ pub enum DeploymentAction {
     Remove {
         /// Deployment name
         name: String,
+        /// Also delete the users/groups the deployment's infections created
+        /// (default leaves them in place — they may be shared)
+        #[arg(long)]
+        purge: bool,
     },
 }
 

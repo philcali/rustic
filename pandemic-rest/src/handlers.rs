@@ -458,14 +458,26 @@ pub async fn get_deployment(
     format_pandemic_response(response.await)
 }
 
+#[derive(Deserialize)]
+pub struct RemoveQuery {
+    /// Also delete the users/groups the deployment's infections created
+    /// (`?purge=true`; default leaves them in place — they may be shared).
+    #[serde(default)]
+    pub purge: bool,
+}
+
 pub async fn remove_deployment(
     Path(name): Path<String>,
     State(state): State<AppState>,
     Extension(scopes): Extension<Vec<String>>,
+    Query(params): Query<RemoveQuery>,
 ) -> ApiResult {
     require_scope!(&state.auth_config, &scopes, "admin");
 
-    let request = AgentRequest::RemoveDeployment { name };
+    let request = AgentRequest::RemoveDeployment {
+        name,
+        purge: params.purge,
+    };
     let agent_client = AgentClient::new().with_secret(&state.agent_secret);
     let response = agent_client.send_agent_request(&request);
     format_pandemic_response(response.await)

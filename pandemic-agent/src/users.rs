@@ -376,6 +376,45 @@ pub fn group_exists(groupname: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Total membership of `groupname`: secondary members listed in
+/// `getent group` **plus** users whose *primary* group is it (matched by
+/// gid against `getent passwd`). `None` when the group does not exist or
+/// membership cannot be determined — callers must treat `None` as
+/// "do not delete".
+///
+/// Purge (phase 8) uses this to refuse removing a group that anyone still
+/// belongs to; the blocklist guards the delete itself.
+pub fn group_member_count(groupname: &str) -> Option<usize> {
+    let output = Command::new("getent")
+        .arg("group")
+        .arg(groupname)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    // name:passwd:gid:members
+    let entry = String::from_utf8_lossy(&output.stdout).to_string();
+    let mut fields = entry.splitn(4, ':');
+    let _name = fields.next()?; // name
+    let _passwd = fields.next()?; // passwd
+    let gid: u32 = fields.next()?.parse().ok()?;
+    let members = fields.next().unwrap_or("");
+    let secondary = members.split(',').filter(|m| !m.is_empty()).count();
+
+    let gid_str = gid.to_string();
+    let passwd = Command::new("getent").arg("passwd").output().ok()?;
+    if !passwd.status.success() {
+        return None;
+    }
+    let primary = String::from_utf8_lossy(&passwd.stdout)
+        .lines()
+        .filter(|line| line.split(':').nth(3) == Some(gid_str.as_str()))
+        .count();
+
+    Some(secondary + primary)
+}
+
 pub async fn list_users() -> anyhow::Result<Vec<String>> {
     let output = Command::new("getent").arg("passwd").output()?;
     if !output.status.success() {
@@ -437,4 +476,18 @@ pub async fn delete_group(groupname: &str) -> anyhow::Result<()> {
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn group_member_count_root_and_missing() {
+        // Every Linux host has a 'root' group with at least one member.
+        assert!(group_member_count("root").unwrap_or(0) >= 1);
+        // A name no host has is `None` (indeterminate), not `Some(0)` —
+        // purge refuses to delete on `None`.
+        assert_eq!(group_member_count("pandemic-test-no-such-group"), None);
+    }
 }

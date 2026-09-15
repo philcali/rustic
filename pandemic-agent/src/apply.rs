@@ -428,16 +428,24 @@ fn preflight_ownership(dep_name: &str, infections: &[ApplyDeploymentInfection]) 
 /// (recorded with this deployment as owner), then the deployment record.
 /// Mirrors [`crate::deployments::remove_deployment`].
 ///
+/// **Rollback (phase 8):** if the run fails (an infection's apply fails, or
+/// the deployment record cannot be written), the infections this run
+/// *freshly* installed are best-effort uninstalled — files, unit, state
+/// record; users/groups stay. Infections that already existed (re-applies)
+/// are left in place. Both lists are reported in the error and the audit
+/// entry. Standalone failed installs keep the idempotent-retry model.
+///
 /// Each infection writes its own `apply_infection` audit entry; this
 /// wrapper adds the deployment-level summary (which infections made it,
-/// where it stopped).
+/// where it stopped, what was rolled back / left applied).
 pub async fn apply_deployment(
     name: &str,
     version: &str,
     variables: &BTreeMap<String, String>,
     infections: &[ApplyDeploymentInfection],
 ) -> Result<serde_json::Value> {
-    let (applied, result) = apply_deployment_inner(name, version, variables, infections).await;
+    let (applied, rolled_back, left_applied, rollback_errors, result) =
+        apply_deployment_inner(name, version, variables, infections).await;
 
     let entry = serde_json::json!({
         "ts": pandemic_common::audit::now_rfc3339(),
@@ -446,6 +454,9 @@ pub async fn apply_deployment(
         "version": version,
         "outcome": if result.is_ok() { "ok" } else { "failed" },
         "applied": applied,
+        "rolled_back": rolled_back,
+        "left_applied": left_applied,
+        "rollback_errors": rollback_errors,
         "error": result.as_ref().err().map(|e| e.to_string()),
     });
     pandemic_common::audit::record_best_effort(&entry);
@@ -453,28 +464,125 @@ pub async fn apply_deployment(
     result
 }
 
+/// Best-effort uninstall of the infections this run freshly installed, in
+/// reverse order (users/groups are left — they may be shared, and a
+/// half-finished install is not the moment to delete identity).
+/// Returns `(rolled_back, left_applied, rollback_errors)`.
+async fn rollback_fresh_installs_in(
+    root: &str,
+    fresh: &[String],
+) -> (Vec<String>, Vec<String>, Vec<String>) {
+    let mut rolled_back = Vec::new();
+    let mut left_applied = Vec::new();
+    let mut rollback_errors = Vec::new();
+    for name in fresh.iter().rev() {
+        match crate::state::uninstall_owned_infection_in(root, name, false).await {
+            Ok(_) => rolled_back.push(name.clone()),
+            Err(e) => {
+                left_applied.push(name.clone());
+                rollback_errors.push(format!("'{name}': {e}"));
+            }
+        }
+    }
+    (rolled_back, left_applied, rollback_errors)
+}
+
+/// Rollback under the default infection root.
+async fn rollback_fresh_installs(fresh: &[String]) -> (Vec<String>, Vec<String>, Vec<String>) {
+    rollback_fresh_installs_in(crate::infection::INFECTIONS_DIR, fresh).await
+}
+
+/// Outcome of `apply_deployment_inner`: infections applied this run,
+/// rolled back on failure, left applied on failure, rollback errors,
+/// and the JSON result (or error).
+type DeploymentOutcome = (
+    Vec<String>,
+    Vec<String>,
+    Vec<String>,
+    Vec<String>,
+    Result<serde_json::Value>,
+);
+
+/// Failure bookkeeping for `apply_deployment_inner`: the rollback outcome
+/// is folded into the error message so the operator sees it in the CLI/REST
+/// response, not only in the audit log.
+fn failure(
+    applied: Vec<String>,
+    rolled_back: Vec<String>,
+    left_applied: Vec<String>,
+    rollback_errors: Vec<String>,
+    base_msg: String,
+) -> DeploymentOutcome {
+    let mut msg = base_msg;
+    msg.push_str(&format!(
+        "\n\n  rolled back (installed by this run): {}",
+        if rolled_back.is_empty() {
+            "(none)".to_string()
+        } else {
+            rolled_back.join(", ")
+        }
+    ));
+    msg.push_str(&format!(
+        "\n  left applied: {}",
+        if left_applied.is_empty() {
+            "(none)".to_string()
+        } else {
+            left_applied.join(", ")
+        }
+    ));
+    for e in &rollback_errors {
+        msg.push_str(&format!("\n  rollback failed: {e}"));
+    }
+    msg.push_str(
+        "\n  re-run the install after fixing the failure — completed steps are idempotent",
+    );
+    (
+        applied,
+        rolled_back,
+        left_applied,
+        rollback_errors,
+        Err(anyhow::anyhow!("{msg}")),
+    )
+}
+
 async fn apply_deployment_inner(
     name: &str,
     version: &str,
     variables: &BTreeMap<String, String>,
     infections: &[ApplyDeploymentInfection],
-) -> (Vec<String>, Result<serde_json::Value>) {
+) -> DeploymentOutcome {
+    let none = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     if let Err(e) = preflight_ownership(name, infections) {
-        return (Vec::new(), Err(e));
+        return (none.0, none.1, none.2, none.3, Err(e));
     }
 
     let mut applied: Vec<String> = Vec::new();
+    let mut fresh: Vec<String> = Vec::new(); // no state record before this run
+    let mut preexisting: Vec<String> = Vec::new(); // had a record (re-apply)
     for inf in infections {
+        let existed = crate::state::is_installed(&inf.name);
         if let Err(err) = apply_infection(&inf.plan, Some(name)).await {
-            return (
+            let (rolled_back, rollback_left, rollback_errors) =
+                rollback_fresh_installs(&fresh).await;
+            let mut left_applied = preexisting.clone();
+            left_applied.extend(rollback_left);
+            return failure(
                 applied,
-                Err(anyhow!(
-                    "deployment '{}' failed on infection '{}':\n\n{err}\n\n  no deployment record was written; infections already applied remain installed",
+                rolled_back,
+                left_applied,
+                rollback_errors,
+                format!(
+                    "deployment '{}' failed on infection '{}':\n\n{err}",
                     name, inf.name
-                )),
+                ),
             );
         }
         applied.push(inf.name.clone());
+        if existed {
+            preexisting.push(inf.name.clone());
+        } else {
+            fresh.push(inf.name.clone());
+        }
     }
 
     let state = DeploymentState {
@@ -493,11 +601,29 @@ async fn apply_deployment_inner(
         installed_at: None, // the record helper stamps it
     };
     if let Err(e) = crate::deployments::record_deployment(name, &state) {
-        return (applied, Err(e));
+        // The infections are installed but the record that would make them
+        // removable is not — roll the fresh ones back rather than orphaning
+        // them under a deployment name with no record.
+        let (rolled_back, rollback_left, rollback_errors) = rollback_fresh_installs(&fresh).await;
+        let mut left_applied = preexisting.clone();
+        left_applied.extend(rollback_left);
+        return failure(
+            applied,
+            rolled_back,
+            left_applied,
+            rollback_errors,
+            format!(
+                "deployment '{}': infections applied but the deployment record could not be written: {e}",
+                name
+            ),
+        );
     }
 
     (
         applied.clone(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
         Ok(serde_json::json!({
             "name": name,
             "applied": applied,
@@ -616,5 +742,95 @@ mod audit_tests {
             "exactly one audit line per operation"
         );
         cleanup(&path);
+    }
+}
+
+#[cfg(test)]
+mod rollback_tests {
+    use super::*;
+    use pandemic_protocol::spec::{InfectionRecordedFile, InfectionState};
+
+    fn temp_root(label: &str) -> String {
+        let dir = std::env::temp_dir().join(format!(
+            "pandemic-agent-rollback-{}-{label}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.to_string_lossy().into_owned()
+    }
+
+    fn record_with_file(root: &str, name: &str, target: &std::path::Path) {
+        let state = InfectionState {
+            name: name.into(),
+            version: "1.0.0".into(),
+            description: "test".into(),
+            variables: BTreeMap::new(),
+            groups: Vec::new(),
+            users: Vec::new(),
+            files: vec![InfectionRecordedFile {
+                target: target.to_string_lossy().into_owned(),
+                sha256: "abc".into(),
+                owner: "root".into(),
+                mode: "0644".into(),
+            }],
+            unit: None,
+            attach: None,
+            health_check: Vec::new(),
+            health_interval: 30,
+            installed_at: None,
+            owner: Some("web-tier".into()),
+        };
+        crate::state::record_infection_in(root, name, &state).unwrap();
+    }
+
+    #[tokio::test]
+    async fn rollback_uninstalls_fresh_infections_in_reverse() {
+        let root = temp_root("fresh");
+        let f1 = std::env::temp_dir().join(format!(
+            "pandemic-agent-rollback-{}-one.conf",
+            std::process::id()
+        ));
+        let f2 = std::env::temp_dir().join(format!(
+            "pandemic-agent-rollback-{}-two.conf",
+            std::process::id()
+        ));
+        std::fs::write(&f1, "one").unwrap();
+        std::fs::write(&f2, "two").unwrap();
+        record_with_file(&root, "alpha", &f1);
+        record_with_file(&root, "beta", &f2);
+
+        let fresh = vec!["alpha".to_string(), "beta".to_string()];
+        let (rolled_back, left_applied, errors) = rollback_fresh_installs_in(&root, &fresh).await;
+
+        assert_eq!(rolled_back, vec!["beta", "alpha"], "reverse install order");
+        assert!(left_applied.is_empty(), "{left_applied:?}");
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(!f1.exists() && !f2.exists(), "recorded files removed");
+        assert!(
+            !crate::state::is_installed_in(&root, "alpha")
+                && !crate::state::is_installed_in(&root, "beta"),
+            "state records removed"
+        );
+
+        for f in [&f1, &f2] {
+            let _ = std::fs::remove_file(f);
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn rollback_reports_unremovable_installs_as_left() {
+        let root = temp_root("left");
+        // No state record: uninstall fails, the name lands in left_applied
+        // with an error — never silently dropped.
+        let fresh = vec!["ghost".to_string()];
+        let (rolled_back, left_applied, errors) = rollback_fresh_installs_in(&root, &fresh).await;
+
+        assert!(rolled_back.is_empty());
+        assert_eq!(left_applied, vec!["ghost"]);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("ghost"));
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

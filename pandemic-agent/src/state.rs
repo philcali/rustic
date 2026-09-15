@@ -265,34 +265,47 @@ pub fn sha256_file(path: &str) -> Option<String> {
 }
 
 /// Uninstall an infection under the default root.
-pub async fn uninstall_infection(name: &str) -> Result<serde_json::Value> {
-    uninstall_infection_in(INFECTIONS_DIR, name).await
+pub async fn uninstall_infection(name: &str, purge: bool) -> Result<serde_json::Value> {
+    uninstall_infection_in(INFECTIONS_DIR, name, purge).await
 }
 
 /// Uninstall `name` from `root`: stop and remove what it owns, delete the
 /// files it wrote (reverse order), and drop its state record.
 ///
-/// Users and groups it created are left in place — they may be shared — and
-/// reported in `notes`.
-pub async fn uninstall_infection_in(root: &str, name: &str) -> Result<serde_json::Value> {
-    uninstall_infection_in_impl(root, name, false).await
+/// Without `purge`, users and groups it created are left in place — they
+/// may be shared — and reported in `notes` (and `left_users`/`left_groups`).
+/// With `purge`, the users/groups the **state record says this infection
+/// created** are deleted (users first, so a group is never left with a
+/// primary member); a group with remaining members is refused and reported,
+/// never force-removed.
+pub async fn uninstall_infection_in(
+    root: &str,
+    name: &str,
+    purge: bool,
+) -> Result<serde_json::Value> {
+    uninstall_infection_in_impl(root, name, false, purge).await
 }
 
 /// As [`uninstall_infection_in`], but without the "owned by deployment —
-/// consider `deployment remove`" note: used by `RemoveDeployment`, whose
-/// caller *is* the owner, so the hint is noise there.
-pub async fn uninstall_owned_infection_in(root: &str, name: &str) -> Result<serde_json::Value> {
-    uninstall_infection_in_impl(root, name, true).await
+/// consider `deployment remove`" note: used by `RemoveDeployment` and by
+/// rollback, whose caller *is* the owner, so the hint is noise there.
+pub async fn uninstall_owned_infection_in(
+    root: &str,
+    name: &str,
+    purge: bool,
+) -> Result<serde_json::Value> {
+    uninstall_infection_in_impl(root, name, true, purge).await
 }
 
 async fn uninstall_infection_in_impl(
     root: &str,
     name: &str,
     suppress_owner_note: bool,
+    purge: bool,
 ) -> Result<serde_json::Value> {
     // Audit (ideas/deployments.md, phase 8): what was removed, and which
-    // users/groups were left in place.
-    match uninstall_infection_body(root, name, suppress_owner_note).await {
+    // users/groups were left in place (or deleted under --purge).
+    match uninstall_infection_body(root, name, suppress_owner_note, purge).await {
         Ok((state, result)) => {
             pandemic_common::audit::record_best_effort(&serde_json::json!({
                 "ts": pandemic_common::audit::now_rfc3339(),
@@ -301,10 +314,13 @@ async fn uninstall_infection_in_impl(
                 "version": state.version,
                 "owner": state.owner,
                 "outcome": "ok",
+                "purge": purge,
                 "removed_files": result.get("removed_files").cloned(),
                 "removed_state": result.get("removed_state").cloned(),
-                "left_users": state.users,
-                "left_groups": state.groups,
+                "removed_users": result.get("removed_users").cloned(),
+                "removed_groups": result.get("removed_groups").cloned(),
+                "left_users": result.get("left_users").cloned(),
+                "left_groups": result.get("left_groups").cloned(),
                 "notes": result.get("notes").cloned(),
             }));
             Ok(result)
@@ -314,6 +330,7 @@ async fn uninstall_infection_in_impl(
                 "ts": pandemic_common::audit::now_rfc3339(),
                 "event": "uninstall_infection",
                 "name": name,
+                "purge": purge,
                 "outcome": "failed",
                 "error": e.to_string(),
             }));
@@ -326,6 +343,7 @@ async fn uninstall_infection_body(
     root: &str,
     name: &str,
     suppress_owner_note: bool,
+    purge: bool,
 ) -> Result<(InfectionState, serde_json::Value)> {
     let state = load_state_in(root, name)?;
     let mut notes = Vec::new();
@@ -381,11 +399,55 @@ async fn uninstall_infection_body(
         std::fs::remove_file(&legacy).is_ok()
     };
 
-    if !state.users.is_empty() || !state.groups.is_empty() {
+    // Phase 8 `--purge`: delete only the identity the state record says
+    // *this* infection created. Users first — a group cannot be deleted
+    // while it is still someone's primary group. A group with remaining
+    // members (secondary or primary) is reported, never force-removed.
+    let mut removed_users = Vec::new();
+    let mut removed_groups = Vec::new();
+    let mut left_users = Vec::new();
+    let mut left_groups = Vec::new();
+
+    if purge {
+        for user in &state.users {
+            match crate::users::delete_user(user).await {
+                Ok(()) => removed_users.push(user.clone()),
+                Err(e) => {
+                    left_users.push(user.clone());
+                    notes.push(format!("purge: user '{user}' left in place: {e}"));
+                }
+            }
+        }
+        for group in &state.groups {
+            match crate::users::group_member_count(group) {
+                Some(0) => match crate::users::delete_group(group).await {
+                    Ok(()) => removed_groups.push(group.clone()),
+                    Err(e) => {
+                        left_groups.push(group.clone());
+                        notes.push(format!("purge: group '{group}' left in place: {e}"));
+                    }
+                },
+                Some(count) => {
+                    left_groups.push(group.clone());
+                    notes.push(format!(
+                        "purge: group '{group}' left in place — {count} remaining member(s)"
+                    ));
+                }
+                None => {
+                    left_groups.push(group.clone());
+                    notes.push(format!(
+                        "purge: group '{group}' left in place — membership could not be determined"
+                    ));
+                }
+            }
+        }
+    } else if !state.users.is_empty() || !state.groups.is_empty() {
+        left_users = state.users.clone();
+        left_groups = state.groups.clone();
         notes.push(format!(
-            "left users [{}] and groups [{}] in place (they may be shared)",
-            state.users.join(", "),
-            state.groups.join(", ")
+            "left users [{}] and groups [{}] in place (they may be shared — re-run with --purge to delete the ones this infection created)",
+            left_users.join(", "),
+            left_groups.join(", ")
         ));
     }
 
@@ -395,6 +457,11 @@ async fn uninstall_infection_body(
             "name": name,
             "removed_files": removed_files,
             "removed_state": removed_state,
+            "purge": purge,
+            "removed_users": removed_users,
+            "removed_groups": removed_groups,
+            "left_users": left_users,
+            "left_groups": left_groups,
             "notes": notes,
         }),
     ))
@@ -581,7 +648,7 @@ health_interval = 45
         }];
         record_infection_in(&root, "rest", &state).unwrap();
 
-        let result = uninstall_infection_in(&root, "rest").await.unwrap();
+        let result = uninstall_infection_in(&root, "rest", false).await.unwrap();
         assert!(!target.exists(), "recorded file must be removed");
         assert!(
             !Path::new(&root).join("rest").exists(),
@@ -597,8 +664,42 @@ health_interval = 45
     #[tokio::test]
     async fn uninstall_unknown_errors() {
         let root = temp_root("uninstall-unknown");
-        let err = uninstall_infection_in(&root, "ghost").await.unwrap_err();
+        let err = uninstall_infection_in(&root, "ghost", false)
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("not installed"));
+        cleanup(&root);
+    }
+
+    #[tokio::test]
+    async fn purge_reports_unremovable_identity_as_left() {
+        // The recorded identity cannot exist on a test host, so the purge
+        // path must fail *safely*: nothing is mutated, and both items are
+        // reported as left (with a purge note), never as removed.
+        let root = temp_root("purge-left");
+        let mut state = sample_state("rest");
+        state.users = vec!["pandemic-test-ghost-user".into()];
+        state.groups = vec!["pandemic-test-ghost-group".into()];
+        record_infection_in(&root, "rest", &state).unwrap();
+
+        let result = uninstall_infection_in(&root, "rest", true).await.unwrap();
+        assert_eq!(result["purge"], true);
+        assert!(
+            result["removed_users"].as_array().unwrap().is_empty(),
+            "nothing may be reported removed"
+        );
+        assert!(result["removed_groups"].as_array().unwrap().is_empty());
+        assert_eq!(result["left_users"][0], "pandemic-test-ghost-user");
+        assert_eq!(result["left_groups"][0], "pandemic-test-ghost-group");
+        let notes = result["notes"].as_array().unwrap();
+        assert!(
+            notes
+                .iter()
+                .filter(|n| n.as_str().unwrap_or("").starts_with("purge:"))
+                .count()
+                >= 2,
+            "each left item needs a purge note: {notes:?}"
+        );
         cleanup(&root);
     }
 
@@ -611,7 +712,9 @@ health_interval = 45
 
         // The owning deployment removes it: the "consider `deployment remove`"
         // hint is noise (the caller *is* that deployment) and must not show.
-        let owned: serde_json::Value = uninstall_owned_infection_in(&root, "rest").await.unwrap();
+        let owned: serde_json::Value = uninstall_owned_infection_in(&root, "rest", false)
+            .await
+            .unwrap();
         let owned_notes = owned["notes"].as_array().unwrap();
         assert!(
             !owned_notes
@@ -624,7 +727,8 @@ health_interval = 45
         let mut web = sample_state("web");
         web.owner = Some("other-deployment".to_string());
         record_infection_in(&root, "web", &web).unwrap();
-        let standalone: serde_json::Value = uninstall_infection_in(&root, "web").await.unwrap();
+        let standalone: serde_json::Value =
+            uninstall_infection_in(&root, "web", false).await.unwrap();
         let standalone_notes = standalone["notes"].as_array().unwrap();
         assert!(
             standalone_notes.iter().any(|n| {

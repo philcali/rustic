@@ -41,13 +41,23 @@ pub async fn handle_deployment_command(
             set,
             registry_url,
             dry_run,
-        } => install(&target, &set, registry_url, dry_run, agent_secret, agent_secret_path).await,
+        } => {
+            install(
+                &target,
+                &set,
+                registry_url,
+                dry_run,
+                agent_secret,
+                agent_secret_path,
+            )
+            .await
+        }
         crate::DeploymentAction::List => list(agent_secret, agent_secret_path).await,
         crate::DeploymentAction::Status { name } => {
             status(name.as_deref(), agent_secret, agent_secret_path).await
         }
-        crate::DeploymentAction::Remove { name } => {
-            remove(&name, agent_secret, agent_secret_path).await
+        crate::DeploymentAction::Remove { name, purge } => {
+            remove(&name, purge, agent_secret, agent_secret_path).await
         }
     }
 }
@@ -377,12 +387,14 @@ async fn show_one(
 
 async fn remove(
     name: &str,
+    purge: bool,
     agent_secret: Option<String>,
     agent_secret_path: Option<PathBuf>,
 ) -> Result<()> {
     let data = agent_action(
         &AgentRequest::RemoveDeployment {
             name: name.to_string(),
+            purge,
         },
         agent_secret,
         agent_secret_path,
@@ -421,6 +433,16 @@ async fn remove(
     }
     if !failed.is_empty() {
         println!("   failed:  {failed}");
+    }
+    if purge {
+        let removed_users = list_of("removed_users");
+        let removed_groups = list_of("removed_groups");
+        if !removed_users.is_empty() {
+            println!("   purged users:  {removed_users}");
+        }
+        if !removed_groups.is_empty() {
+            println!("   purged groups: {removed_groups}");
+        }
     }
     if let Some(notes) = data.get("notes").and_then(|v| v.as_array()) {
         for note in notes {

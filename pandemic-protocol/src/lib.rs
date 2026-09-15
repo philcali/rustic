@@ -210,6 +210,11 @@ pub enum AgentRequest {
     UninstallInfection {
         /// infection name
         name: String,
+        /// also delete the users/groups the state record says this
+        /// infection created (phase 8 `--purge`; default leaves them in
+        /// place — they may be shared)
+        #[serde(default)]
+        purge: bool,
     },
 
     // Spec-driven deployment lifecycle (ideas/deployments.md, phase 4)
@@ -235,6 +240,11 @@ pub enum AgentRequest {
     RemoveDeployment {
         /// deployment name
         name: String,
+        /// also delete the users/groups the infection state records say
+        /// the deployment's infections created (phase 8 `--purge`; default
+        /// leaves them in place — they may be shared)
+        #[serde(default)]
+        purge: bool,
     },
 
     // Plan/Apply boundary (ideas/deployments.md, phase 5). The client does
@@ -758,6 +768,14 @@ mod tests {
             (
                 AgentRequest::UninstallInfection {
                     name: "rest".to_string(),
+                    purge: false,
+                },
+                r#""type":"UninstallInfection""#,
+            ),
+            (
+                AgentRequest::UninstallInfection {
+                    name: "rest".to_string(),
+                    purge: true,
                 },
                 r#""type":"UninstallInfection""#,
             ),
@@ -816,6 +834,14 @@ mod tests {
             (
                 AgentRequest::RemoveDeployment {
                     name: "rest-stack".to_string(),
+                    purge: false,
+                },
+                r#""type":"RemoveDeployment""#,
+            ),
+            (
+                AgentRequest::RemoveDeployment {
+                    name: "rest-stack".to_string(),
+                    purge: true,
                 },
                 r#""type":"RemoveDeployment""#,
             ),

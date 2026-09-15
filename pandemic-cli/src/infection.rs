@@ -17,7 +17,9 @@ use anyhow::{bail, Context, Result};
 use pandemic_protocol::spec::{parse_infection_spec, InfectionSpec};
 use pandemic_protocol::AgentRequest;
 
-use crate::apply::{build_plan_from_spec, parse_set_args, parse_set_values, resolve_infection_target};
+use crate::apply::{
+    build_plan_from_spec, parse_set_args, parse_set_values, resolve_infection_target,
+};
 use crate::registry::registry_client;
 use crate::service::agent_action;
 
@@ -35,8 +37,8 @@ pub async fn handle_infection_command(
         crate::InfectionAction::Status { name } => {
             status(name.as_deref(), agent_secret, agent_secret_path).await
         }
-        crate::InfectionAction::Uninstall { name } => {
-            uninstall(&name, agent_secret, agent_secret_path).await
+        crate::InfectionAction::Uninstall { name, purge } => {
+            uninstall(&name, purge, agent_secret, agent_secret_path).await
         }
     }
 }
@@ -321,12 +323,14 @@ async fn detail(
 
 async fn uninstall(
     name: &str,
+    purge: bool,
     agent_secret: Option<String>,
     agent_secret_path: Option<PathBuf>,
 ) -> Result<()> {
     let data = agent_action(
         &AgentRequest::UninstallInfection {
             name: name.to_string(),
+            purge,
         },
         agent_secret,
         agent_secret_path,
@@ -344,6 +348,27 @@ async fn uninstall(
     } else {
         for path in &removed {
             println!("   removed {}", path.as_str().unwrap_or("?"));
+        }
+    }
+    let list_of = |key: &str| {
+        data.get(key)
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_default()
+    };
+    if purge {
+        let removed_users = list_of("removed_users");
+        let removed_groups = list_of("removed_groups");
+        if !removed_users.is_empty() {
+            println!("   purged users:  {removed_users}");
+        }
+        if !removed_groups.is_empty() {
+            println!("   purged groups: {removed_groups}");
         }
     }
     if let Some(notes) = data.get("notes").and_then(|v| v.as_array()) {

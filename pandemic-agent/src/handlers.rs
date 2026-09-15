@@ -295,12 +295,12 @@ pub async fn handle_agent_request(request: AgentRequest) -> Response {
             }
         }
 
-        AgentRequest::UninstallInfection { name } => {
-            info!("Uninstalling infection: {name}");
+        AgentRequest::UninstallInfection { name, purge } => {
+            info!("Uninstalling infection: {name} (purge: {purge})");
             if !crate::state::is_installed(&name) {
                 return Response::not_found(format!("infection '{name}' is not installed"));
             }
-            match crate::state::uninstall_infection(&name).await {
+            match crate::state::uninstall_infection(&name, purge).await {
                 Ok(result) => Response::success_with_data(result),
                 Err(e) => Response::error(format!("Failed to uninstall infection: {e}")),
             }
@@ -339,12 +339,12 @@ pub async fn handle_agent_request(request: AgentRequest) -> Response {
             }
         }
 
-        AgentRequest::RemoveDeployment { name } => {
-            info!("Removing deployment: {name}");
+        AgentRequest::RemoveDeployment { name, purge } => {
+            info!("Removing deployment: {name} (purge: {purge})");
             if !crate::deployments::is_deployed(&name) {
                 return Response::not_found(format!("deployment '{name}' is not installed"));
             }
-            match crate::deployments::remove_deployment(&name).await {
+            match crate::deployments::remove_deployment(&name, purge).await {
                 Ok(result) => Response::success_with_data(result),
                 Err(e) => Response::error(format!("Failed to remove deployment: {e}")),
             }
