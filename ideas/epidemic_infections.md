@@ -4,6 +4,151 @@
 
 Epidemic infections enable configuration and updates to "spread" across pandemic nodes in the network, with different infection levels controlling the propagation mechanism and intentionality.
 
+## Implementation plan (codified)
+
+> **This is the single source of truth for building epidemic across sessions.**
+> Read this top-to-bottom to pick up the work cold: the fixed decisions say what
+> is *not* to be re-litigated, the increments say what is done vs. next, and the
+> resume point names the exact next step and where each piece lives.
+
+### Fixed decisions (do not re-litigate without the owner)
+
+1. **The primitive is node / group / coordinator**, not "infection level
+   metadata in the plugin registry" and not a bespoke protocol.
+   - **Node** = a host running `pandemic-node` (identity `name` + `addr:port`).
+   - **Group** = a named trust boundary: one shared *epidemic secret* + a node
+     roster, declared in `~/.config/pandemic/groups.toml`.
+   - **Coordinator** = `pandemic-cli epidemic`: holds a group's secret + roster,
+     plans once, applies to every node, reports per-node results.
+2. **Reuse the existing agent wire protocol** — line-delimited JSON, one
+   HMAC-SHA256 challenge/response handshake + one request/response — carried
+   over **TCP** instead of a Unix socket. Do **not** invent a new wire format;
+   the node and the coordinator speak the same protocol as the agent.
+3. **One wire source of truth:** `pandemic-common::{auth, wire, remote}`.
+   The agent server, the node receiver, and both client paths all go through
+   these. Any new network capability routes through them too.
+4. **Two secrets, two hops — never mix them.**
+   - *Epidemic* secret (`/etc/pandemic/epidemic-secret`) guards the **network**
+     coordinator→node hop.
+   - *Agent* secret (`/etc/pandemic/agent-secret`) guards the **local**
+     node→agent hop.
+5. **A node is a narrow deployment surface** (allowlist):
+   `GetCapabilities`, `ApplyDeployment`, `GetDeploymentStatus`, `ListDeployments`,
+   `PreviewDeployment`. No general remote shell; everything else is refused and
+   never reaches the agent.
+6. **The coordinator reuses the same pure `Plan` as `deployment install`**
+   (`resolve_deployment_plan` + `print_dry_run` in `pandemic-cli/src/deployment.rs`).
+   One plan is computed locally, once, and sent to every node.
+7. **A partial spread is a failure** — the coordinator exits non-zero if any node
+   fails. It must never look like success.
+8. **Honest security posture:** transport is **authenticated, not yet
+   encrypted** (HMAC proves the peer holds the secret; the payload travels in
+   cleartext over TCP). **TLS + payload signing are the production gate**
+   (Increment 4), shared with the registry signature work. Node default bind is
+   loopback (`127.0.0.1:7711`); binding `0.0.0.0` is deliberate + firewalled.
+
+### Increment status
+
+| # | Increment | Maps to this doc's levels | Status |
+|---|---|---|---|
+| 1 | Node / group / coordinator + reliable TCP spread | Foundation | **done** (v0.5.0) |
+| 2 | Discovery (mDNS/Bonjour) — roster discovery | Level 1 | planned — **next** |
+| 3 | Multicast + targeting + canary | Level 2 | planned |
+| 4 | Reliability + hardening (retries, audit, rate-limit, per-node secrets, TLS, signing) | Level 3 + Phase 4 | planned |
+
+#### Increment 1 — Node / group / coordinator + reliable TCP spread — **done**
+
+Shipped: the `pandemic-node` receiver (handshake + narrow allowlist + forward to
+local agent, 5 integration tests); `pandemic-cli epidemic spread/nodes`
+(dry-run, per-node results, non-zero on partial); the groups file + roster merge;
+the shared `pandemic-common::{auth,wire,remote}` (with the agent refactored onto
+it); docs (`docs/epidemic.md`), operator loop (`e2e/README.md`), and this plan.
+Gate green: `cargo build --workspace`, `clippy --workspace -- -D warnings`,
+`cargo fmt --check`, `cargo test --workspace` (199 passing).
+
+#### Increment 2 — Discovery (mDNS/Bonjour) — **next**
+
+Goal: the coordinator **discovers** the roster instead of hand-typing
+`--node host:port`. A node advertises itself; the coordinator lists the live
+peers and (optionally) folds them into a group.
+
+- Node side: announce a service record (e.g. `_pandemic-node._tcp.local`) with a
+  stable identity + the port, alongside the TCP listener.
+- Coordinator side: an `epidemic nodes --discover` (or `epidemic discover`)
+  probe that returns live `name → addr:port` pairs; optionally
+  `epidemic spread --discover <group>` that unions discovered peers with the
+  file roster.
+- **Acceptance:** in the e2e container, starting `pandemic-node` makes it
+  discoverable and `epidemic nodes --discover` lists it with the right port;
+  spreading to a discovered peer behaves exactly like an explicit `--node`.
+- **Open decisions (owner to weigh in):**
+  - New crate `pandemic-discovery` vs. a `pandemic-common::discovery` module?
+    (Discovery is also useful to the daemon/console — a shared module argues
+    for `pandemic-common`.)
+  - Reuse `pandemic-udp` (already in the tree) or add a dedicated `mdns` dep?
+  - Discover-and-list only, or also auto-join a named group by name?
+
+#### Increment 3 — Multicast + targeting + canary
+
+Goal: subnet-wide spread with **criteria targeting** and a **canary** rollout,
+on top of Increment 2 discovery.
+
+- Broadcast the *intent* to a multicast group; nodes self-select by matching
+  criteria (labels/roles/capabilities) against their own identity.
+- **Canary:** apply to a named subset or a percentage first, then the rest; the
+  coordinator reports per-cohort results.
+- **Acceptance:** a multicast spread reaches every matching node on the test
+  subnet, non-matching nodes are untouched, and a canary spread applies to the
+  first cohort only until promoted.
+- **Open decisions:** the multicast group address + payload schema; the
+  criteria-matching semantics (who evaluates — node vs. coordinator); canary as
+  percentage vs. named subset.
+
+#### Increment 4 — Reliability + hardening
+
+Goal: make epidemic production-grade.
+
+- **TLS** on the coordinator→node hop (rustls); per-node secrets or mTLS
+  identity in place of the single shared group secret.
+- **Retries + idempotency** on the apply; a **sender-side audit** entry per
+  spread (which nodes, which plan hash, per-node outcome).
+- **Rate limiting** to prevent spread storms.
+- **Payload signing** (the production gate, shared with the registry): a node
+  only applies a deployment it can verify.
+- **Acceptance:** a spread over an untrusted network is end-to-end encrypted and
+  signed; a forged/unsigned deployment is refused; a dropped node is retried and
+  reported, not silently lost.
+
+### Resume point
+
+- **Next up: Increment 2 (discovery).** Start by resolving the two open
+  decisions above (crate-vs-module; `pandemic-udp` reuse vs. a new mDNS dep),
+  then add the node-side announce + coordinator `--discover` probe, and extend
+  the `e2e/README.md` epidemic section with a discovery loop.
+- **The gate to pass before an increment counts as done** (mirrors CI):
+  `cargo build --workspace` && `cargo clippy --workspace -- -D warnings` &&
+  `cargo fmt --check` && `cargo test --workspace`.
+- **Where each piece lives (code map):**
+  - `pandemic-common/src/auth.rs` — handshake crypto (`sign`/`verify`/
+    `generate_nonce`/`generate_secret`) + `EPIDEMIC_SECRET_PATH`.
+  - `pandemic-common/src/wire.rs` — `authenticate_stream` +
+    `send_request_stream` (shared framing for Unix + TCP).
+  - `pandemic-common/src/remote.rs` — `RemoteClient` (coordinator→node TCP).
+  - `pandemic-common/src/groups.rs` — `NodeConfig`, `GroupConfig`,
+    `load_groups[_or_default]`, `find_group`, `merge_roster`,
+    `default_groups_path`.
+  - `pandemic-common/src/agent.rs` — `AgentClient` (local Unix), `AGENT_SECRET_PATH`.
+  - `pandemic-node/src/{main,allowlist}.rs` — the node receiver + allowlist.
+  - `pandemic-cli/src/epidemic.rs` — coordinator (`spread`/`nodes`/
+    `resolve_roster`/`apply_to_node`/`resolve_epidemic_secret`/`print_results`).
+  - `pandemic-cli/src/deployment.rs` — `resolve_deployment_plan` +
+    `print_dry_run` (shared by `deployment install` **and** `epidemic spread`).
+  - `pandemic-agent/src/main.rs` — agent server (shares `auth`).
+  - `pandemic-protocol/` — `AgentRequest`, `Response`, `AuthChallenge`/`AuthResponse`.
+  - How-to: `docs/epidemic.md`; operator loop: `e2e/README.md` (epidemic section).
+
+---
+
 ## Infection Levels
 
 ### **Level 0: Isolated** 

@@ -70,35 +70,8 @@ async fn install(
     agent_secret: Option<String>,
     agent_secret_path: Option<PathBuf>,
 ) -> Result<()> {
-    // Pure Plan step (shared with the REST API). A local spec path stays fully
-    // offline; a registry name fetches + sha256-verifies the deployment bundle
-    // and its infection-spec atoms, then resolves + renders + validates them.
-    let dp = if target_is_local(target) {
-        let spec_path = Path::new(target);
-        let text = std::fs::read_to_string(spec_path)
-            .with_context(|| format!("reading deployment spec {}", spec_path.display()))?;
-        let spec = parse_deployment_spec(&text)
-            .with_context(|| format!("parsing deployment spec {}", spec_path.display()))?;
-        let spec_dir = spec_path
-            .parent()
-            .map(Path::to_path_buf)
-            .filter(|p| p != Path::new(""))
-            .unwrap_or_else(|| PathBuf::from("."));
-
-        let declared: Vec<String> = spec.variables.keys().cloned().collect();
-        let set = parse_set_args(
-            set_args,
-            &declared,
-            &format!("deployment '{}'", spec.meta.name),
-        )?;
-        build_deployment_plan_from(&spec, &spec_dir, &set)?
-    } else {
-        // Registry name: --set values parsed raw, then validated against the
-        // deployment bundle's declared variables inside the resolver.
-        let set = parse_set_values(set_args)?;
-        let client = registry_client(registry_url);
-        resolve_deployment_target(&client, target, &set).await?
-    };
+    // Pure Plan step (shared with the REST API and the epidemic coordinator).
+    let dp = resolve_deployment_plan(target, set_args, registry_url).await?;
 
     if dry_run {
         print_dry_run(&dp);
@@ -132,8 +105,46 @@ async fn install(
     Ok(())
 }
 
+/// The pure `Plan` step, shared by `deployment install` (one local agent) and
+/// `epidemic spread` (many nodes). A local `deployment.toml` path stays fully
+/// offline; a registry name fetches + sha256-verifies the deployment bundle and
+/// its infection-spec atoms. Either way the result is a concrete, rendered
+/// [`DeploymentPlan`] ready to hand to an agent.
+pub(crate) async fn resolve_deployment_plan(
+    target: &str,
+    set_args: &[String],
+    registry_url: Option<String>,
+) -> Result<DeploymentPlan> {
+    if target_is_local(target) {
+        let spec_path = Path::new(target);
+        let text = std::fs::read_to_string(spec_path)
+            .with_context(|| format!("reading deployment spec {}", spec_path.display()))?;
+        let spec = parse_deployment_spec(&text)
+            .with_context(|| format!("parsing deployment spec {}", spec_path.display()))?;
+        let spec_dir = spec_path
+            .parent()
+            .map(Path::to_path_buf)
+            .filter(|p| p != Path::new(""))
+            .unwrap_or_else(|| PathBuf::from("."));
+
+        let declared: Vec<String> = spec.variables.keys().cloned().collect();
+        let set = parse_set_args(
+            set_args,
+            &declared,
+            &format!("deployment '{}'", spec.meta.name),
+        )?;
+        build_deployment_plan_from(&spec, &spec_dir, &set)
+    } else {
+        // Registry name: --set values parsed raw, then validated against the
+        // deployment bundle's declared variables inside the resolver.
+        let set = parse_set_values(set_args)?;
+        let client = registry_client(registry_url);
+        Ok(resolve_deployment_target(&client, target, &set).await?)
+    }
+}
+
 /// The `--dry-run` view: everything resolved and rendered, nothing applied.
-fn print_dry_run(dp: &DeploymentPlan) {
+pub(crate) fn print_dry_run(dp: &DeploymentPlan) {
     println!(
         "DRY RUN — deployment '{}' v{} (nothing will be applied)",
         dp.spec.meta.name, dp.spec.meta.version

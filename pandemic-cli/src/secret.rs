@@ -19,7 +19,7 @@ pub fn ensure_agent_secret_in(dir: &Path) -> Result<PathBuf> {
     let path = dir.join("agent-secret");
 
     if !path.exists() {
-        let secret = hex::encode(rand::random::<[u8; 32]>());
+        let secret = pandemic_common::auth::generate_secret();
         std::fs::write(&path, format!("{secret}\n"))
             .with_context(|| format!("writing {}", path.display()))?;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))

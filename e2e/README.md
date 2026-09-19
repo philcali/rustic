@@ -681,6 +681,104 @@ docker exec -u root pandemic-e2e pandemic-cli \
 Expected: each refusal names the owning deployment / "standalone" and exits
 non-zero, with no foreign record created.
 
+## Example: epidemic spread (phase 5)
+
+The epidemic feature spreads a resolved deployment to a group of hosts. In one
+container the loop is trivial: a `pandemic-node` receiver on loopback, and the
+coordinator (`pandemic-cli epidemic spread`) spreading the deployment **to
+itself**. This reuses the `webapp` spec from the deployment section above and
+proves the key property: *spread-to-self produces the same result as a local
+`deployment install`*. The node forwards the deployment to the same local
+agent, so the on-host outcome is identical — the only difference is that the
+plan traveled a network handshake (epidemic secret) before the local apply
+(agent secret).
+
+Prereq: the bootstrap section above (agent secret minted, `pandemic-agent`
+started) and the `webapp` spec from the deployment section (or any deployment
+spec at a path you know).
+
+```bash
+# Mint the epidemic (network) secret at its default path. Both the node and
+# the coordinator resolve it from here — no --secret flag needed.
+docker exec -u root pandemic-e2e bash -c '
+  printf "e2e-epidemic-secret\n" > /etc/pandemic/epidemic-secret
+  chmod 600 /etc/pandemic/epidemic-secret'
+
+# Start the node receiver on loopback (detached), forwarding to the local
+# agent. It picks up both secrets from their default paths.
+docker exec -u root pandemic-e2e pkill -f pandemic-node 2>/dev/null || true
+docker exec -u root -d pandemic-e2e pandemic-node --listen 127.0.0.1:7711
+docker exec pandemic-e2e sh -c 'sleep 1'
+```
+
+### A. Dry-run (touches nothing)
+
+```bash
+docker exec -u root pandemic-e2e pandemic-cli \
+  epidemic spread /opt/specs/webapp/deployment.toml --node 127.0.0.1:7711 --dry-run
+#   → prints the node list (1 endpoint) + the same resolved plan as a local
+#     `deployment install --dry-run`. Nothing is applied anywhere.
+```
+
+### B. Spread to self (== a local install)
+
+```bash
+docker exec -u root pandemic-e2e pandemic-cli \
+  deployment remove webapp 2>/dev/null || true     # start from a clean slate
+
+docker exec -u root pandemic-e2e pandemic-cli \
+  epidemic spread /opt/specs/webapp/deployment.toml --node 127.0.0.1:7711
+#   →  ✓  127.0.0.1:7711/127.0.0.1:7711  applied
+#   →  ✅ spread deployment 'webapp' to 1 node(s)
+
+# The on-host result is the same as the deployment section's install:
+docker exec pandemic-e2e cat /etc/webapp/api.conf      # → port = 8080
+docker exec pandemic-e2e cat /etc/webapp/web.conf      # → backend = http://127.0.0.1:8080
+docker exec pandemic-e2e systemctl is-active web       # → active
+docker exec -u root pandemic-e2e pandemic-cli deployment status webapp
+docker exec -u root pandemic-e2e pandemic-cli infection status | grep webapp  # OWNER
+```
+
+Expected: the same files rendered, the same unit `active`, and the deployment
+recorded as owner — because the node handed the identical `ApplyDeployment`
+to the same local agent.
+
+### C. Partial failure is a non-zero exit
+
+Spread to a good node *and* a dead one. The good one applies; the dead one is
+unreachable; the coordinator reports the mixed result and exits non-zero
+(a partial spread must not look like success):
+
+```bash
+docker exec -u root pandemic-e2e sh -c '
+  pandemic-cli epidemic spread /opt/specs/webapp/deployment.toml \
+    --node 127.0.0.1:7711 --node 127.0.0.1:9999
+  echo "exit code: $?"'
+#   →  ✓  127.0.0.1:7711/127.0.0.1:7711  applied
+#   →  ✗  127.0.0.1:9999/127.0.0.1:9999  FAILED
+#   →  ⚠️  spread of 'webapp' failed on 1 of 2 node(s)
+#   →  exit code: 1
+```
+
+Expected: `exit code: 1`.
+
+### D. The node only exposes the deployment surface
+
+The node's allowlist is unit-tested (`pandemic-node`'s
+`denied_request_is_rejected`), but the intent is worth restating: a
+coordinator can only ask a node to *deploy* (`ApplyDeployment` and the
+deployment status/preview/list primitives) — it cannot reach the agent's
+user/package/file primitives over the wire. A wrong epidemic secret fails the
+handshake before any request is considered (unit-tested as
+`wrong_secret_fails_handshake`).
+
+### Teardown
+
+```bash
+docker exec -u root pandemic-e2e pkill -f pandemic-node 2>/dev/null || true
+docker exec -u root pandemic-e2e pandemic-cli deployment remove webapp 2>/dev/null || true
+```
+
 ## Debugging
 
 ```bash

@@ -4,6 +4,7 @@ mod audit;
 mod bootstrap;
 mod daemon;
 mod deployment;
+mod epidemic;
 mod infection;
 mod registry;
 mod secret;
@@ -82,6 +83,17 @@ enum Commands {
         agent_secret_path: Option<PathBuf>,
         #[command(subcommand)]
         action: DeploymentAction,
+    },
+    /// Spread a deployment to a group of nodes (the epidemic feature)
+    Epidemic {
+        /// epidemic (network) shared secret (overrides the group's / default path)
+        #[arg(long)]
+        epidemic_secret: Option<String>,
+        /// path to the epidemic shared secret
+        #[arg(long)]
+        epidemic_secret_path: Option<PathBuf>,
+        #[command(subcommand)]
+        action: epidemic::EpidemicAction,
     },
 }
 
@@ -370,6 +382,13 @@ async fn main() -> Result<()> {
             agent_secret_path,
             action,
         } => deployment::handle_deployment_command(action, agent_secret, agent_secret_path).await?,
+        Commands::Epidemic {
+            epidemic_secret,
+            epidemic_secret_path,
+            action,
+        } => {
+            epidemic::handle_epidemic_command(action, epidemic_secret, epidemic_secret_path).await?
+        }
         Commands::Audit { limit, json } => audit::handle_audit_command(limit, json)?,
     }
 

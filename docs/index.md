@@ -49,6 +49,17 @@ audit log, and a two-step web console flow. See the full how-to in
 [deployments.md](deployments.md): spec anatomy, CLI/REST/console, registry
 publishing, state & ownership, rollback and `--purge` policy.
 
+## Epidemic (Network Deployment Spreading)
+
+Spread a resolved deployment to a group of nodes. A **coordinator**
+(`pandemic-cli epidemic`) plans the deployment once, locally, then applies it
+to every **node** in a named **group**; each node runs the privileged apply
+through its own agent. Two secrets guard the two hops (network vs. local),
+the node exposes a narrow deployment surface, and a partial spread is a
+non-zero-exit failure. See the full how-to in [epidemic.md](epidemic.md):
+the node/group/coordinator primitive, groups file, `pandemic-node` receiver,
+`epidemic spread`, and the security posture.
+
 ## Static Registry
 
 Pandemic comes with a software registry that is created for every

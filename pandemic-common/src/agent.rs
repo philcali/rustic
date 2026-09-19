@@ -1,10 +1,11 @@
 use anyhow::Result;
-use pandemic_protocol::{AgentRequest, AuthChallenge, AuthResponse, Response};
+use pandemic_protocol::{AgentRequest, Response};
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
+
+use crate::wire;
 
 pub const AGENT_SOCKET_PATH: &str = "/var/run/pandemic/admin.sock";
 /// Default location of the agent shared secret, installed by
@@ -85,34 +86,8 @@ impl AgentClient {
         Ok(self)
     }
 
-    async fn authenticate(&self, mut stream: UnixStream) -> Result<UnixStream> {
-        use hmac::Mac;
-
-        // Read auth challenge
-        let mut line = String::new();
-        tokio::io::BufReader::new(&mut stream)
-            .read_line(&mut line)
-            .await?;
-        let challenge: AuthChallenge = serde_json::from_str(line.trim())
-            .map_err(|e| anyhow::anyhow!("Expected AuthChallenge from agent: {e}"))?;
-        let nonce = challenge.nonce;
-
-        // Compute HMAC-SHA256 signature
-        let mut mac: hmac::Hmac<sha2::Sha256> =
-            <hmac::Hmac<sha2::Sha256> as sha2::digest::KeyInit>::new_from_slice(
-                self.secret.as_bytes(),
-            )?;
-        mac.update(nonce.as_bytes());
-        let signature = hex::encode(mac.finalize().into_bytes());
-
-        // Send auth response
-        let response = AuthResponse { nonce, signature };
-        let response_json = serde_json::to_string(&response)?;
-        stream.write_all(response_json.as_bytes()).await?;
-        stream.write_all(b"\n").await?;
-        stream.flush().await?;
-
-        Ok(stream)
+    async fn authenticate(&self, stream: UnixStream) -> Result<UnixStream> {
+        wire::authenticate_stream(stream, &self.secret).await
     }
 
     pub async fn connect(&self) -> Result<UnixStream> {
@@ -121,43 +96,37 @@ impl AgentClient {
         Ok(authenticated)
     }
 
+    /// Send one `AgentRequest` to the agent and read back the `Response`.
     pub async fn send_agent_request(&self, request: &AgentRequest) -> Result<Response> {
         let stream = self.connect().await?;
-        let mut buf_reader = BufReader::new(stream);
-
-        let request_json = serde_json::to_string(request)?;
-        buf_reader
-            .get_mut()
-            .write_all(request_json.as_bytes())
-            .await?;
-        buf_reader.get_mut().write_all(b"\n").await?;
-
-        let mut response_line = String::new();
-        buf_reader.read_line(&mut response_line).await?;
-
-        let response: Response = serde_json::from_str(response_line.trim())?;
-        Ok(response)
+        wire::send_request_stream(stream, request).await
     }
 
+    /// Liveness + capability probe: a `GetCapabilities` round-trip.
     pub async fn ping(&self) -> Result<Vec<String>> {
-        let request = AgentRequest::GetCapabilities;
-        let response = self.send_agent_request(&request).await?;
+        let response = self
+            .send_agent_request(&AgentRequest::GetCapabilities)
+            .await?;
+        capabilities_from(&response)
+    }
+}
 
-        match response {
-            Response::Success { data: Some(data) } => {
-                if let Some(capabilities) = data.get("capabilities") {
-                    if let Some(caps_array) = capabilities.as_array() {
-                        let caps: Vec<String> = caps_array
-                            .iter()
-                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                            .collect();
-                        return Ok(caps);
-                    }
-                }
-                Ok(vec!["systemd".to_string()])
+/// Pull the `capabilities` list out of a `GetCapabilities` response.
+///
+/// Shared by [`AgentClient`] (local) and [`crate::remote::RemoteClient`] (network)
+/// so both agree on the shape.
+pub fn capabilities_from(response: &Response) -> Result<Vec<String>> {
+    match response {
+        Response::Success { data: Some(data) } => {
+            if let Some(capabilities) = data.get("capabilities").and_then(|v| v.as_array()) {
+                return Ok(capabilities
+                    .iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect());
             }
-            _ => Err(anyhow::anyhow!("Agent ping failed")),
+            Ok(vec!["systemd".to_string()])
         }
+        _ => Err(anyhow::anyhow!("Agent ping failed")),
     }
 }
 

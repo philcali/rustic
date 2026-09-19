@@ -8,15 +8,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Workspace Structure
 
-All crates share version `0.4.0` and workspace dependencies defined in the root `Cargo.toml`.
+All crates share version `0.5.0` and workspace dependencies defined in the root `Cargo.toml`.
 
 | Crate | Purpose |
 |-------|---------|
 | `pandemic-daemon` | Core daemon — listens on a Unix socket, manages plugin registry, event bus, health metrics |
 | `pandemic-protocol` | Shared types: `Request`, `Response`, `Event`, `PluginInfo`, `HealthMetrics`, `AgentRequest`, and the spec-driven install types (`InfectionSpec`/`DeploymentSpec`, `InfectionState`/`DeploymentState`) |
 | `pandemic-common` | Shared client libraries: `DaemonClient` / `PersistentClient` (daemon IPC), `AgentClient` (admin socket IPC), `RegistryClient` (remote infection registry) |
-| `pandemic-cli` | CLI tool: `daemon list/get/health/deregister`, `service install/start/stop/restart`, `service attach/detach`, `infection install/status/uninstall` (spec-driven lifecycle), `deployment install/list/status/remove` (deployment lifecycle), `bootstrap`, `agent` operations |
+| `pandemic-cli` | CLI tool: `daemon list/get/health/deregister`, `service install/start/stop/restart`, `service attach/detach`, `infection install/status/uninstall` (spec-driven lifecycle), `deployment install/list/status/remove` (deployment lifecycle), `epidemic spread/nodes` (network spreading — the coordinator), `bootstrap`, `agent` operations |
 | `pandemic-agent` | Privileged root-only agent handling systemd service management, user/group management, infection attach/detach (sidecar units), deployment record/list/status/remove (ownership + reverse-order removal), and registry operations |
+| `pandemic-node` | Epidemic **node** receiver (root-only): listens on TCP, authenticates the coordinator with the epidemic secret, enforces a narrow deployment allowlist, and forwards approved requests to the local agent over the Unix admin socket |
 | `pandemic-rest` | HTTP REST API server (axum) — exposes daemon operations over HTTP with Bearer token auth |
 | `pandemic-console` | Web dashboard (Vite + vanilla JS) — serves static SPA, registers as a plugin with the daemon |
 | `pandemic-udp` | UDP proxy — exposes the daemon's Unix socket over UDP |
@@ -43,6 +44,8 @@ Plugins communicate with the daemon via `Request`/`Response`/`Event` messages ov
 
 `deployment install <spec> [--set k=v ...] [--dry-run]` composes a deployment from multiple infections: it resolves **shared** variables (`--set` > `vars` bindings > declared defaults, iteratively so values may reference each other) plus per-infection `vars` overrides, renders every infection, and applies them in the deployment's declared `order`, recording an `owner` (the deployment name) on each infection. State lands at `/etc/pandemic/deployments/<name>/state.toml` (dir 0700, file 0600: shared variables, ordered owned infections). `deployment list` and `deployment status [name]` re-check reality (unit active/inactive, rendered-file hashes) against the record. `deployment remove <name>` uninstalls only the infections it owns, in **reverse** order. Re-running `deployment install` under an existing name is an idempotent re-apply/upgrade. Ownership is precise: a deployment **refuses** to adopt an infection that is standalone or already owned by another deployment (v1 refuses rather than merges), and `infection install` refuses to install an infection that a deployment owns. The agent stays a dumb executor — only individual primitives + record/list/status/remove requests cross the wire, never the deployment spec.
 
+`epidemic spread <target> [--group NAME | --node host:port …] [--set k=v …] [--registry-url URL] [--dry-run]` spreads a resolved deployment to a group of hosts. It is built on the **node / group / coordinator** primitive, not a bespoke protocol: a **node** is a host running `pandemic-node` (an identity + `addr:port`); a **group** is a named trust boundary (one shared epidemic secret + a node roster, declared in `~/.config/pandemic/groups.toml`); the **coordinator** is `pandemic-cli epidemic` itself. The coordinator runs the *same* pure `Plan` step as `deployment install` — resolve, render, validate — **once, locally**, then sends that single `ApplyDeployment` to every node; each node's agent does the privileged apply. The wire is the existing agent protocol (line-delimited JSON, one HMAC-SHA256 challenge/response handshake + request/response) over TCP instead of a Unix socket; the handshake crypto, framing, and secret handling are shared via `pandemic_common::{auth,wire,remote}` so agent, node, and coordinator agree byte-for-byte. **Two secrets guard two hops**: the *epidemic* secret (`/etc/pandemic/epidemic-secret`) authenticates the network coordinator→node hop, the *agent* secret (`/etc/pandemic/agent-secret`) the local node→agent hop. A node exposes only a **narrow allowlist** (`GetCapabilities`, `ApplyDeployment`, `GetDeploymentStatus`, `ListDeployments`, `PreviewDeployment`) — everything else is refused and never reaches the agent. A partial spread exits non-zero. `epidemic nodes [--group NAME]` lists the configured rosters. `pandemic-node` listens on `127.0.0.1:7711` by default; the transport is authenticated but **not yet encrypted** — TLS + payload signing are the later hardening increment (see `ideas/epidemic_infections.md`).
+
 The event bus supports wildcard topics (`plugin.deregistered*` matches `plugin.deregistered`).
 
 ## Building & Running
@@ -68,6 +71,12 @@ cargo run -p pandemic-udp
 
 # Run the MQTT bridge (needs a broker, e.g. mosquitto)
 cargo run -p pandemic-mqtt -- --broker-url mqtt://127.0.0.1:1883 --topic-prefix pandemic
+
+# Run the epidemic node receiver (root-only; binds 127.0.0.1:7711 by default)
+sudo cargo run -p pandemic-node
+
+# Spread a deployment to a group (the coordinator)
+cargo run -p pandemic-cli -- epidemic spread ./webapp/deployment.toml --group edge
 
 # Run the example infection
 cargo run -p hello-infection

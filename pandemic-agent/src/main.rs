@@ -12,9 +12,8 @@ mod users;
 
 use anyhow::Result;
 use clap::Parser;
-use hmac::{Hmac, Mac};
+use pandemic_common::auth;
 use pandemic_protocol::{AgentRequest, AuthChallenge, AuthResponse, Response};
-use sha2::Sha256;
 use std::path::PathBuf;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
@@ -120,7 +119,7 @@ fn resolve_secret(
         }
     }
 
-    let secret = hex::encode(rand::random::<[u8; 32]>());
+    let secret = auth::generate_secret();
     error!(
         "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
  WARN: No agent secret configured. A random secret was generated.
@@ -140,9 +139,8 @@ async fn handle_connection(mut stream: UnixStream, secret: String) -> Result<()>
     let mut line = String::new();
 
     // Send auth challenge
-    let nonce = hex::encode(rand::random::<[u8; 16]>());
     let challenge = AuthChallenge {
-        nonce: nonce.clone(),
+        nonce: auth::generate_nonce(),
     };
     let challenge_json = serde_json::to_string(&challenge)?;
     writer.write_all(challenge_json.as_bytes()).await?;
@@ -163,23 +161,8 @@ async fn handle_connection(mut stream: UnixStream, secret: String) -> Result<()>
         }
     };
 
-    // Verify HMAC-SHA256 signature
-    let mut mac: Hmac<Sha256> = Hmac::new_from_slice(secret.as_bytes())?;
-    mac.update(auth_response.nonce.as_bytes());
-    let expected = mac.finalize().into_bytes();
-
-    // Decode the received signature from hex
-    let sig_bytes = match hex::decode(&auth_response.signature) {
-        Ok(b) => b,
-        Err(_) => {
-            warn!("Authentication failed: invalid hex signature");
-            return Ok(());
-        }
-    };
-
-    // Constant-time comparison to prevent timing attacks
-    let equal: bool = subtle::ConstantTimeEq::ct_eq(&expected[..], &sig_bytes).into();
-    if !equal {
+    // Verify the HMAC-SHA256 signature in constant time (shared crypto, see auth::)
+    if !auth::verify(&secret, &auth_response.nonce, &auth_response.signature) {
         warn!("Authentication failed: invalid signature");
         return Ok(());
     }
