@@ -108,6 +108,31 @@ Flags:
 | `--secret` / `--secret-path` | — | Epidemic (network) shared secret, inline or file |
 | `--agent-socket` | `/var/run/pandemic/admin.sock` | Local agent admin socket to forward to |
 | `--agent-secret` / `--agent-secret-path` | — | Agent (local) shared secret, inline or file |
+| `--name` | hostname | mDNS instance name the node advertises under (see Discovery) |
+| `--no-advertise` | off | Disable mDNS advertisement entirely |
+
+### Discovery (mDNS / Bonjour)
+
+By default a node **advertises itself over mDNS** so a coordinator on the same
+LAN can find it without hand-typing the roster. The node publishes the
+service type `_pandemic-node._tcp` (DNS-SD, RFC 6335) on the interface that
+matches `--listen`:
+
+- **instance name** = `--name` (or the hostname) — the node's identity;
+- **port** from `--listen` (carried in the SRV record);
+- **address** from `--listen` (the A record); for a `0.0.0.0` bind the node
+  picks its primary LAN IPv4;
+- a `pandemic=<version>` TXT record for tooling.
+
+This advertisement is **purely a discovery aid**: it adds no network surface
+and does not change the TCP/allowlist model. If mDNS cannot start (no usable
+IPv4 interface, multicast blocked, …) the node logs a warning and keeps serving
+its TCP surface — it simply won't be discoverable.
+
+A loopback bind (`--listen 127.0.0.1:…`, the default) advertises on loopback,
+so it is only discoverable from the same host — the safe default for local
+testing. Bind `0.0.0.0` to make the node discoverable (and reachable) on the
+LAN.
 
 ### The narrow surface
 
@@ -149,7 +174,34 @@ pandemic-cli epidemic spread ./webapp/deployment.toml --group edge --dry-run
 # See your groups and rosters.
 pandemic-cli epidemic nodes            # all groups
 pandemic-cli epidemic nodes --group edge
+
+# Discovery (mDNS): list the nodes advertising on the LAN, and/or spread to
+# whatever is found (unioned with any --group / --node, deduped by address).
+pandemic-cli epidemic nodes --discover --interface 192.168.1.0
+pandemic-cli epidemic spread ./webapp/deployment.toml --discover
+pandemic-cli epidemic spread ./webapp/deployment.toml --discover --dry-run
 ```
+
+### Discovery flags
+
+`--discover` (on `nodes` and `spread`) probes the LAN over mDNS for
+`_pandemic-node._tcp` and uses what it finds:
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--discover` | off | Also target / list nodes found via mDNS |
+| `--interface` | all interfaces | The IPv4 address to probe on (e.g. `192.168.1.5`; for loopback, `127.0.0.1`) |
+| `--timeout` | `3` | mDNS probe timeout in seconds |
+
+`epidemic nodes --discover` prints the discovered nodes (instance name →
+`addr:port`) above your configured groups. `epidemic spread --discover` unions
+the discovered nodes with any `--group` / `--node` roster, deduplicating by
+address (a roster entry's configured name wins over the discovered one). On
+`spread`, a discovery probe failure is a **warning** — the explicit roster is
+still spread to; on `nodes` it is an error, since discovery is the point.
+
+Because mDNS is per-interface, use `--interface` to target a specific LAN (or
+loopback for local testing) rather than probing every interface.
 
 `spread <target>` resolves `target` (local spec path **or** registry name)
 with the *same* `resolve_deployment_plan` that `deployment install` uses — so
@@ -230,12 +282,24 @@ node, and a node never learns about its peers.
 
 ## Roadmap
 
-This is Increment 1 — the node/group/coordinator primitive with a direct TCP
-transport. The larger epidemic vision (discovery, multicast, reliability) is
-tracked in [`ideas/epidemic_infections.md`](../ideas/epidemic_infections.md):
+The larger epidemic vision (discovery, multicast, reliability) is tracked in
+[`ideas/epidemic_infections.md`](../ideas/epidemic_infections.md):
 
-1. **Node / group / coordinator + TCP spread** — *this increment*.
-2. **Discovery** — mDNS/Bonjour so the coordinator doesn't hand-type the roster.
+1. **Node / group / coordinator + TCP spread** — *done*.
+2. **Discovery** — mDNS/Bonjour so the coordinator doesn't hand-type the roster
+   — *done* (node advertises; `epidemic nodes/spread --discover`).
 3. **Multicast + targeting** — subnet-wide spread, target criteria, canary.
 4. **Reliability + hardening** — retries, sender-side audit, rate limiting,
    per-node secrets, TLS, payload signing.
+
+## Known issues
+
+- **mDNS probe can print a spurious panic.** The `agnostic-mdns` /
+  `dns-protocol-patch` stack occasionally panics on a tokio worker thread
+  while parsing a packet in its receive loop (observed ~1 in 9 loopback
+  probes: `range start index … out of range for slice …` in `dns-protocol-patch`).
+  It is **non-fatal** — discovery still returns the correct nodes and the
+  command exits normally — but the panic text is printed to stderr. It is an
+  upstream library bug (we are on the latest published versions), not a fault
+  in how we drive the client (the same-process advertise→discover round-trip
+  passes cleanly). If it becomes a problem, the workaround is to probe again.

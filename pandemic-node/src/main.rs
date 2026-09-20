@@ -12,9 +12,17 @@
 //! The handshake crypto, framing, and secret handling are all shared with the
 //! agent and the CLI via `pandemic_common`, so a node, an agent, and a
 //! coordinator speak the identical protocol.
+//!
+//! **Discovery (increment 2):** alongside the TCP listener, the node
+//! advertises itself over mDNS as `<name>._pandemic-node._tcp.local` (on the
+//! interface matching `--listen`), so a coordinator on the same link can find
+//! it with `pandemic-cli epidemic nodes --discover` instead of a hand-typed
+//! roster. Disable with `--no-advertise`; the TCP surface is unaffected
+//! either way.
 
 mod allowlist;
 
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
@@ -22,7 +30,7 @@ use tracing::{error, info, warn};
 
 use anyhow::Result;
 use clap::Parser;
-use pandemic_common::{auth, AgentClient};
+use pandemic_common::{auth, discovery, AgentClient};
 use pandemic_protocol::{AgentRequest, AuthChallenge, AuthResponse, Response};
 
 use allowlist::request_allowed;
@@ -38,6 +46,15 @@ pub struct Args {
     /// TCP address to listen on (the coordinator -> node network hop).
     #[arg(long, default_value = DEFAULT_LISTEN)]
     pub listen: String,
+
+    /// Node identity advertised over mDNS (the `_pandemic-node._tcp.local`
+    /// instance name; letters/digits/hyphens). Defaults to the hostname.
+    #[arg(long)]
+    pub name: Option<String>,
+
+    /// Do not advertise over mDNS (the TCP surface is unaffected).
+    #[arg(long)]
+    pub no_advertise: bool,
 
     /// Epidemic (network) shared secret, inline.
     #[arg(long)]
@@ -90,6 +107,25 @@ async fn main() -> Result<()> {
         args.listen, args.agent_socket
     );
 
+    // Discovery (increment 2): advertise alongside the TCP listener, on the
+    // interface matching --listen, so a coordinator on the same link finds
+    // this node. Advertise failure is not fatal — the TCP surface keeps
+    // working and an explicit `--node` roster still reaches this node.
+    // (The binding is held for the process lifetime: dropping it stops
+    // the advertisement.)
+    let _advertiser = if args.no_advertise {
+        None
+    } else {
+        let name = args.name.clone().unwrap_or_else(default_node_name);
+        match advertise_for_listen(&args.listen, &name).await {
+            Ok(server) => Some(server),
+            Err(e) => {
+                warn!("mDNS advertise failed; node will not be discoverable: {e}");
+                None
+            }
+        }
+    };
+
     loop {
         match listener.accept().await {
             Ok((stream, peer)) => {
@@ -107,6 +143,58 @@ async fn main() -> Result<()> {
             Err(e) => error!("Failed to accept connection: {e}"),
         }
     }
+}
+
+/// Start the mDNS advertiser for the `--listen` address:
+///
+///   * `127.0.0.1:7711` — advertise `127.0.0.1:7711` on loopback (the
+///     e2e spread-to-self path);
+///   * `0.0.0.0:7711`   — advertise the primary LAN IPv4 on that interface;
+///   * `<ip>:7711`      — advertise that IP on its interface.
+async fn advertise_for_listen(listen: &str, name: &str) -> Result<discovery::Advertiser> {
+    let addr: SocketAddr = listen
+        .parse()
+        .map_err(|e| anyhow::anyhow!("parsing --listen '{listen}': {e}"))?;
+    let port = addr.port();
+    match addr.ip() {
+        IpAddr::V4(v4) if v4.is_unspecified() => {
+            let lan = primary_lan_ip().ok_or_else(|| {
+                anyhow::anyhow!("--listen 0.0.0.0 but no LAN IPv4 interface to advertise on")
+            })?;
+            discovery::advertise_node(name, IpAddr::V4(lan), port, lan).await
+        }
+        IpAddr::V4(v4) => discovery::advertise_node(name, IpAddr::V4(v4), port, v4).await,
+        IpAddr::V6(_) => {
+            anyhow::bail!(
+                "mDNS advertise is IPv4-only; use an IPv4 --listen (the TCP surface is unaffected)"
+            )
+        }
+    }
+}
+
+/// The local IPv4 the kernel would route to a public destination — i.e. the
+/// primary LAN address. (UDP `connect` sends no packets.)
+fn primary_lan_ip() -> Option<Ipv4Addr> {
+    let sock = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    sock.connect("8.8.8.8:80").ok()?;
+    match sock.local_addr().ok()?.ip() {
+        IpAddr::V4(v4) => Some(v4),
+        IpAddr::V6(_) => None,
+    }
+}
+
+/// The default node identity for the mDNS instance name: the hostname.
+fn default_node_name() -> String {
+    let mut buf = [0u8; 256];
+    let ret = unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) };
+    if ret == 0 {
+        let len = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+        let name = String::from_utf8_lossy(&buf[..len]).into_owned();
+        if !name.is_empty() {
+            return name;
+        }
+    }
+    "pandemic-node".to_string()
 }
 
 /// Run one coordinator connection: authenticate it with the epidemic secret,
@@ -236,6 +324,8 @@ fn resolve_secret(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+
     use pandemic_common::RemoteClient;
     use serde_json::json;
     use tempfile::tempdir;
@@ -330,6 +420,36 @@ mod tests {
             matches!(&resp, Response::Error { message } if message.contains("not allowed")),
             "expected a denial, got {resp:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn advertise_for_listen_uses_the_loopback_interface() {
+        let server = advertise_for_listen("127.0.0.1:7711", "epi-node-test")
+            .await
+            .expect("advertiser starts");
+        // And a coordinator probing loopback finds it, with the right port.
+        let found = pandemic_common::discover_nodes(
+            Some(Ipv4Addr::new(127, 0, 0, 1)),
+            Duration::from_secs(3),
+        )
+        .await
+        .unwrap();
+        assert!(
+            found
+                .iter()
+                .any(|n| n.name == "epi-node-test" && n.addr == "127.0.0.1:7711"),
+            "expected epi-node-test@127.0.0.1:7711 in {found:?}"
+        );
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn advertise_for_listen_rejects_ipv6_listens() {
+        let err = match advertise_for_listen("[::1]:7711", "epi-node-test").await {
+            Err(e) => e,
+            Ok(_) => panic!("IPv6 listen must not advertise"),
+        };
+        assert!(err.to_string().contains("IPv4-only"));
     }
 
     #[tokio::test]

@@ -10,10 +10,18 @@
 //!   * the **epidemic** secret guards the coordinator -> node handshake;
 //!   * the **agent** secret is the node's business (it holds it; the coordinator
 //!     never sees it).
+//!
+//! `--discover` (increment 2) probes the LAN over mDNS: `epidemic nodes
+//! --discover` lists the nodes advertising `_pandemic-node._tcp.local`, and
+//! `epidemic spread --discover` unions them with the group/ad-hoc roster
+//! (deduplicated by address, same as everywhere else).
 
+use std::net::Ipv4Addr;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
+use pandemic_common::discovery::{self, DiscoveredNode};
 use pandemic_common::groups::{
     default_groups_path, find_group, load_groups_or_default, merge_roster,
 };
@@ -30,6 +38,23 @@ use crate::deployment::{print_dry_run, resolve_deployment_plan};
 struct EpidemicSecret {
     inline: Option<String>,
     path: Option<PathBuf>,
+}
+
+/// The `--discover` probe options, shared by `spread` and `nodes`. Bundled so
+/// the three related flags travel as one unit through the call chain.
+#[derive(Clone, Copy)]
+struct Discovery {
+    enabled: bool,
+    /// Interface to probe on (an IPv4 address), or `None` for all interfaces.
+    interface: Option<Ipv4Addr>,
+    /// Probe timeout in seconds.
+    timeout_secs: u64,
+}
+
+impl Discovery {
+    fn duration(self) -> Duration {
+        Duration::from_secs(self.timeout_secs)
+    }
 }
 
 #[derive(clap::Subcommand)]
@@ -53,12 +78,30 @@ pub enum EpidemicAction {
         /// Show the resolved plan + node list without applying anywhere
         #[arg(long)]
         dry_run: bool,
+        /// Also target nodes found on the LAN via mDNS discovery
+        #[arg(long)]
+        discover: bool,
+        /// mDNS probe interface (an IPv4 address, e.g. 127.0.0.1); default: all
+        #[arg(long)]
+        interface: Option<Ipv4Addr>,
+        /// mDNS probe timeout in seconds
+        #[arg(long, default_value_t = 3)]
+        timeout: u64,
     },
     /// List configured groups and their node rosters
     Nodes {
         /// Only show this group
         #[arg(long)]
         group: Option<String>,
+        /// Also list nodes found on the LAN via mDNS discovery
+        #[arg(long)]
+        discover: bool,
+        /// mDNS probe interface (an IPv4 address, e.g. 127.0.0.1); default: all
+        #[arg(long)]
+        interface: Option<Ipv4Addr>,
+        /// mDNS probe timeout in seconds
+        #[arg(long, default_value_t = 3)]
+        timeout: u64,
     },
 }
 
@@ -75,10 +118,18 @@ pub async fn handle_epidemic_command(
             registry_url,
             set,
             dry_run,
+            discover,
+            interface,
+            timeout,
         } => {
             let secret = EpidemicSecret {
                 inline: epidemic_secret,
                 path: epidemic_secret_path,
+            };
+            let probe = Discovery {
+                enabled: discover,
+                interface,
+                timeout_secs: timeout,
             };
             spread(
                 &target,
@@ -88,13 +139,29 @@ pub async fn handle_epidemic_command(
                 &set,
                 dry_run,
                 secret,
+                probe,
             )
             .await
         }
-        EpidemicAction::Nodes { group } => nodes(group.as_deref()).await,
+        EpidemicAction::Nodes {
+            group,
+            discover,
+            interface,
+            timeout,
+        } => {
+            let probe = Discovery {
+                enabled: discover,
+                interface,
+                timeout_secs: timeout,
+            };
+            nodes(group.as_deref(), probe).await
+        }
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+// Top-level `epidemic spread` handler: it carries the full CLI flag set
+// (target, roster sources, plan inputs, dry-run, secret, and the mDNS probe).
 async fn spread(
     target: &str,
     group: Option<&str>,
@@ -103,13 +170,41 @@ async fn spread(
     set_args: &[String],
     dry_run: bool,
     epidemic_secret: EpidemicSecret,
+    probe: Discovery,
 ) -> Result<()> {
     // 1. Resolve the target roster: the named group's nodes merged with any
     //    ad-hoc `--node` endpoints (de-duplicated by addr, group first).
-    let (roster, group_secret_path) = resolve_roster(group, adhoc)?;
+    let (mut roster, group_secret_path) = resolve_roster(group, adhoc)?;
+
+    // 1b. `--discover`: probe the LAN over mDNS and union the result into the
+    //     roster (deduped by addr; roster entries keep their configured names).
+    //     A probe failure is a warning, not an error — the explicit roster is
+    //     still spread to; if the roster ends up empty the check below fires.
+    if probe.enabled {
+        match discovery::discover_nodes(probe.interface, probe.duration()).await {
+            Ok(discovered) => {
+                let added = merge_discovered(&mut roster, &discovered);
+                println!(
+                    "discovered {} node(s) via mDNS ({}s probe), {} added to roster:",
+                    discovered.len(),
+                    probe.timeout_secs,
+                    added
+                );
+                for d in &discovered {
+                    println!("  {:<16} {}", d.name, d.addr);
+                }
+            }
+            Err(e) => {
+                eprintln!(
+                    "WARN: mDNS discovery failed: {e}; spreading only to the explicit roster"
+                );
+            }
+        }
+    }
+
     if roster.is_empty() && !dry_run {
         return Err(anyhow::anyhow!(
-            "no nodes to spread to — pass --node host:port, or --group NAME (see `epidemic nodes`)"
+            "no nodes to spread to — pass --node host:port, or --group NAME, or --discover (see `epidemic nodes`)"
         ));
     }
 
@@ -165,6 +260,25 @@ fn resolve_roster(
         }
         None => Ok((merge_roster(None, adhoc), None)),
     }
+}
+
+/// Union `--discover` results into the roster: append each discovered node
+/// that is not already present by address (roster entries keep their configured
+/// names; discovered nodes use their mDNS instance name). Returns how many
+/// were added.
+fn merge_discovered(roster: &mut Vec<NodeConfig>, discovered: &[DiscoveredNode]) -> usize {
+    let mut added = 0;
+    for d in discovered {
+        if roster.iter().any(|n| n.addr == d.addr) {
+            continue;
+        }
+        roster.push(NodeConfig {
+            name: d.name.clone(),
+            addr: d.addr.clone(),
+        });
+        added += 1;
+    }
+    added
 }
 
 /// Ping a node, then apply the deployment. A failed ping is reported as
@@ -259,7 +373,29 @@ fn resolve_epidemic_secret(
     Ok(secret)
 }
 
-async fn nodes(group: Option<&str>) -> Result<()> {
+async fn nodes(group: Option<&str>, probe: Discovery) -> Result<()> {
+    // `--discover`: probe the LAN over mDNS. Discovery is the point of this
+    // flag, so a probe failure is a hard error (not a warning as in `spread`).
+    if probe.enabled {
+        let discovered = discovery::discover_nodes(probe.interface, probe.duration())
+            .await
+            .with_context(|| {
+                format!(
+                    "mDNS discovery (interface={:?}, {}s probe)",
+                    probe.interface, probe.timeout_secs
+                )
+            })?;
+        println!("discovered via mDNS ({}s probe):", probe.timeout_secs);
+        if discovered.is_empty() {
+            println!("  (no nodes advertising {})", discovery::SERVICE_FQDN);
+        } else {
+            for d in &discovered {
+                println!("  {:<16} {}", d.name, d.addr);
+            }
+        }
+        println!();
+    }
+
     let groups = load_groups_or_default(None)?;
     if groups.is_empty() {
         println!(
@@ -348,6 +484,54 @@ addr = "10.0.0.1:7711"
         assert_eq!(roster[0].name, "edge-1");
         assert_eq!(roster[1].name, "10.0.0.9:7711");
         assert_eq!(g.secret_path.as_deref(), Some("/tmp/edge-secret"));
+    }
+
+    #[test]
+    fn discovered_nodes_merge_deduped_by_addr() {
+        let mut roster = vec![
+            NodeConfig {
+                name: "edge-1".to_string(),
+                addr: "10.0.0.1:7711".to_string(),
+            },
+            NodeConfig {
+                name: "10.0.0.2:7711".to_string(),
+                addr: "10.0.0.2:7711".to_string(),
+            },
+        ];
+        let discovered = vec![
+            // Same address as a roster entry → not added (roster name wins).
+            DiscoveredNode {
+                name: "edge-1".to_string(),
+                addr: "10.0.0.1:7711".to_string(),
+            },
+            // New address → added, keeping its mDNS instance name.
+            DiscoveredNode {
+                name: "edge-9".to_string(),
+                addr: "10.0.0.9:7711".to_string(),
+            },
+        ];
+
+        assert_eq!(merge_discovered(&mut roster, &discovered), 1);
+        assert_eq!(roster.len(), 3);
+        assert_eq!(roster[0].name, "edge-1");
+        assert_eq!(roster[2].name, "edge-9");
+        assert_eq!(roster[2].addr, "10.0.0.9:7711");
+    }
+
+    #[test]
+    fn discovered_nodes_merge_is_idempotent() {
+        let mut roster = vec![NodeConfig {
+            name: "edge-1".to_string(),
+            addr: "10.0.0.1:7711".to_string(),
+        }];
+        let discovered = vec![DiscoveredNode {
+            name: "edge-1".to_string(),
+            addr: "10.0.0.1:7711".to_string(),
+        }];
+
+        assert_eq!(merge_discovered(&mut roster, &discovered), 0);
+        assert_eq!(merge_discovered(&mut roster, &discovered), 0);
+        assert_eq!(roster.len(), 1);
     }
 
     #[test]

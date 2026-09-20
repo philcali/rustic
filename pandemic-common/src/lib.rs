@@ -3,6 +3,7 @@ pub mod apply;
 pub mod audit;
 pub mod auth;
 pub mod client;
+pub mod discovery;
 pub mod groups;
 pub mod registry;
 pub mod remote;
@@ -20,6 +21,7 @@ pub use apply::{
 };
 pub use auth::{generate_nonce, generate_secret, sign, verify, EPIDEMIC_SECRET_PATH};
 pub use client::{DaemonClient, PersistentClient};
+pub use discovery::{advertise_node, discover_nodes, Advertiser, DiscoveredNode, SERVICE_FQDN};
 pub use groups::{
     default_groups_path, find_group, load_groups, load_groups_or_default, GroupConfig, NodeConfig,
 };

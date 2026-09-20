@@ -772,11 +772,134 @@ user/package/file primitives over the wire. A wrong epidemic secret fails the
 handshake before any request is considered (unit-tested as
 `wrong_secret_fails_handshake`).
 
+### E. Discovery (mDNS) — same host, over loopback
+
+The node advertises itself over mDNS by default. A loopback bind advertises on
+loopback, so a coordinator on the *same host* can find it without hand-typing
+the address. Restart the node with a fixed `--name` so the discovered identity
+is deterministic (it defaults to the container hostname), then probe:
+
+```bash
+# Restart the node with a stable mDNS instance name.
+docker exec -u root pandemic-e2e pkill -f pandemic-node 2>/dev/null || true
+docker exec -u root -d pandemic-e2e pandemic-node --listen 127.0.0.1:7711 --name e2e-node
+docker exec pandemic-e2e sh -c 'sleep 1'
+
+# List the nodes advertising on loopback (probe interface = 127.0.0.1).
+docker exec -u root pandemic-e2e pandemic-cli \
+  epidemic nodes --discover --interface 127.0.0.1 --timeout 3
+#   → discovered via mDNS (3s probe):
+#       e2e-node       127.0.0.1:7711
+#     (then the normal "No named groups…" / group listing follows)
+
+# Spread to whatever is discovered (here: just the loopback node).
+docker exec -u root pandemic-e2e pandemic-cli \
+  epidemic spread /opt/specs/webapp/deployment.toml --discover --interface 127.0.0.1 --timeout 3
+#   → discovered 1 node(s) via mDNS (3s probe), 1 added to roster:
+#       e2e-node       127.0.0.1:7711
+#   →  ✓  e2e-node/127.0.0.1:7711  applied
+#   →  ✅ spread deployment 'webapp' to 1 node(s)
+```
+
+Expected: the discovered node's instance name is `e2e-node` and its endpoint is
+`127.0.0.1:7711`. The `--interface 127.0.0.1` scopes the probe to loopback so
+it does not also sweep the container's other interfaces.
+
+### F. Discovery (mDNS) — two containers across a shared bridge
+
+The "creative" variant: two `pandemic-systemd` containers on the same Docker
+bridge act as two hosts. mDNS multicast is delivered over a Docker user-defined
+bridge, so a node in one container is discoverable (and spreadable) from the
+other — no host network access needed. Container **B** runs the node (bound to
+`0.0.0.0` so it advertises its bridge IP and is reachable); container **A** is
+the coordinator that discovers and spreads to it.
+
+```bash
+# 1. A shared L2 bridge so the two containers can see each other.
+docker network create epi-lan
+docker run -d --name epi-a --network epi-lan --privileged --tmpfs /run --tmpfs /tmp pandemic-systemd
+docker run -d --name epi-b --network epi-lan --privileged --tmpfs /run --tmpfs /tmp pandemic-systemd
+for c in epi-a epi-b; do
+  until [ "$(docker exec $c systemctl is-system-running 2>/dev/null)" in running degraded ]; do sleep 1; done
+done
+
+# 2. Load the binaries under test into both (the agent too — B needs it).
+for b in pandemic pandemic-cli pandemic-agent pandemic-node; do
+  docker cp target/debug/$b epi-a:/usr/local/bin/$b
+  docker cp target/debug/$b epi-b:/usr/local/bin/$b
+done
+
+# 3. Bootstrap B's agent + mint the shared epidemic secret in BOTH containers.
+docker exec -u root epi-b pandemic-cli bootstrap install --with-agent
+docker exec -u root epi-b systemctl start pandemic-agent
+for c in epi-a epi-b; do
+  docker exec -u root $c bash -c 'mkdir -p /etc/pandemic && printf "e2e-epidemic-secret\n" > /etc/pandemic/epidemic-secret && chmod 600 /etc/pandemic/epidemic-secret'
+done
+
+# 4. B: the "remote" node — bind all interfaces so it advertises its bridge IP.
+docker exec -u root -d epi-b pandemic-node --listen 0.0.0.0:7711 --name epi-b-node
+
+# 5. A: the coordinator. Discover B's node on A's bridge interface.
+A_IP=$(docker exec epi-a hostname -I | awk '{print $1}')
+docker exec -u root epi-a pandemic-cli epidemic nodes --discover --interface "$A_IP" --timeout 5
+#   → discovered via mDNS (5s probe):
+#       epi-b-node       172.x.0.3:7711        # B's bridge IP — found across the bridge
+```
+
+Now a deployment spec on A, and spread to the *discovered* node (B) — the only
+target is the mDNS result, proving it behaves like an explicit `--node`:
+
+```bash
+# 6. A small spec on A (target within the agent's allowed prefixes: /etc,/opt,/usr/local,/var).
+docker exec -u root epi-a bash -c '
+mkdir -p /opt/specs/hello/hello/files
+cat > /opt/specs/hello/deployment.toml <<"EOF"
+[deployment]
+name = "hello"
+version = "1.0.0"
+[[infections]]
+name = "hello"
+source = "./hello/infection.toml"
+order = 1
+EOF
+cat > /opt/specs/hello/hello/infection.toml <<"EOF"
+[infection]
+name = "hello"
+version = "1.0.0"
+[files]
+"hello.txt" = { target = "/opt/hello-from-a.txt", owner = "root", mode = "0644" }
+[health]
+check = ["true"]
+EOF
+echo "spread from A to discovered B node" > /opt/specs/hello/hello/files/hello.txt'
+
+# 7. Spread from A to B, discovered over the bridge.
+docker exec -u root epi-a pandemic-cli \
+  epidemic spread /opt/specs/hello/deployment.toml --discover --interface "$A_IP" --timeout 5
+#   → discovered 1 node(s) via mDNS (5s probe), 1 added to roster:
+#       epi-b-node       172.x.0.3:7711
+#   →  ✓  epi-b-node/172.x.0.3:7711  applied
+#   →  ✅ spread deployment 'hello' to 1 node(s)
+
+# 8. The file + deployment record landed in B (not A).
+docker exec epi-b cat /opt/hello-from-a.txt                    # → spread from A to discovered B node
+docker exec -u root epi-b pandemic-cli deployment status hello  # → hello v1.0.0 installed
+```
+
+Expected: A discovers B's `epi-b-node` (B's bridge IP) and the deployment is
+applied **on B** — the plan crossed the bridge, B's node authenticated with the
+shared epidemic secret and forwarded to B's agent (agent secret). Teardown:
+`docker rm -f epi-a epi-b && docker network rm epi-lan`.
+
 ### Teardown
 
 ```bash
+# Single-container loop (section E / earlier):
 docker exec -u root pandemic-e2e pkill -f pandemic-node 2>/dev/null || true
 docker exec -u root pandemic-e2e pandemic-cli deployment remove webapp 2>/dev/null || true
+# Two-container loop (section F):
+docker rm -f epi-a epi-b 2>/dev/null || true
+docker network rm epi-lan 2>/dev/null || true
 ```
 
 ## Debugging

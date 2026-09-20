@@ -5,11 +5,12 @@ Planned improvements for the Pandemic codebase.
 ## Features in progress
 
 - [ ] **Epidemic (network deployment spreading)** — the node / group / coordinator
-  primitive that spreads a resolved deployment to a group of hosts. **Increment 1
-  (node + group + coordinator over reliable TCP) is done**; increments 2–4
-  (discovery, multicast/canary, reliability + TLS/signing) are planned. The
-  codified, cross-session build plan — fixed decisions, increment status, resume
-  point, and code map — lives in [`ideas/epidemic_infections.md`](ideas/epidemic_infections.md).
+  primitive that spreads a resolved deployment to a group of hosts. **Increments
+  1–2 are done**: node + group + coordinator over reliable TCP, and mDNS
+  discovery (node advertises; `epidemic nodes/spread --discover`). Increments
+  3–4 (multicast/canary, reliability + TLS/signing) are planned. The codified,
+  cross-session build plan — fixed decisions, increment status, resume point, and
+  code map — lives in [`ideas/epidemic_infections.md`](ideas/epidemic_infections.md).
   Operator how-to: [`docs/epidemic.md`](docs/epidemic.md).
 
 ## Security

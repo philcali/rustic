@@ -22,6 +22,13 @@ hex = "0.4"
 # coordinator) and the constant-time compare behind agent auth.
 rand = "0.8"
 subtle = "2.6"
+# Epidemic discovery (increment 2): mDNS advertise (node) + probe (coordinator).
+agnostic-mdns = { workspace = true }
+# agnostic-mdns -> agnostic-net enables rustix with only the `net` feature, but
+# rustix >= 1.1.5 compiles `net/sockopt.rs` against `crate::timespec`, which
+# needs the `time` feature (upstream feature-gating bug). Enabling `time` here
+# fixes the build for the whole dependency graph; we do not call rustix directly.
+rustix = { version = "1", features = ["time"] }
 # Bundle extraction for registry spec/deployment atoms (pure-Rust, musl-safe).
 tar = "0.4"
 flate2 = "1.0"

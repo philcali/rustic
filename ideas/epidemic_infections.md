@@ -52,8 +52,8 @@ Epidemic infections enable configuration and updates to "spread" across pandemic
 | # | Increment | Maps to this doc's levels | Status |
 |---|---|---|---|
 | 1 | Node / group / coordinator + reliable TCP spread | Foundation | **done** (v0.5.0) |
-| 2 | Discovery (mDNS/Bonjour) — roster discovery | Level 1 | planned — **next** |
-| 3 | Multicast + targeting + canary | Level 2 | planned |
+| 2 | Discovery (mDNS/Bonjour) — roster discovery | Level 1 | **done** |
+| 3 | Multicast + targeting + canary | Level 2 | planned — **next** |
 | 4 | Reliability + hardening (retries, audit, rate-limit, per-node secrets, TLS, signing) | Level 3 + Phase 4 | planned |
 
 #### Increment 1 — Node / group / coordinator + reliable TCP spread — **done**
@@ -66,27 +66,51 @@ it); docs (`docs/epidemic.md`), operator loop (`e2e/README.md`), and this plan.
 Gate green: `cargo build --workspace`, `clippy --workspace -- -D warnings`,
 `cargo fmt --check`, `cargo test --workspace` (199 passing).
 
-#### Increment 2 — Discovery (mDNS/Bonjour) — **next**
+#### Increment 2 — Discovery (mDNS/Bonjour) — **done**
 
 Goal: the coordinator **discovers** the roster instead of hand-typing
 `--node host:port`. A node advertises itself; the coordinator lists the live
-peers and (optionally) folds them into a group.
+peers and folds them into the target list.
 
-- Node side: announce a service record (e.g. `_pandemic-node._tcp.local`) with a
-  stable identity + the port, alongside the TCP listener.
-- Coordinator side: an `epidemic nodes --discover` (or `epidemic discover`)
-  probe that returns live `name → addr:port` pairs; optionally
-  `epidemic spread --discover <group>` that unions discovered peers with the
-  file roster.
-- **Acceptance:** in the e2e container, starting `pandemic-node` makes it
+Shipped:
+- Node side: `pandemic-node` advertises `_pandemic-node._tcp.local` by default
+  (instance name = `--name` or hostname; SRV carries the port from `--listen`,
+  A record the address, TXT `pandemic=<version>`), on the interface matching
+  `--listen`. `--no-advertise` opts out; a failed advertisement is a warning and
+  never blocks the TCP surface. IPv6-only listens are refused (mDNS is IPv4).
+- Coordinator side: `epidemic nodes --discover` lists the live peers above the
+  groups; `epidemic spread --discover` unions discovered peers with any
+  `--group`/`--node` roster (dedup by address, roster name wins). `--interface`
+  (IPv4) scopes the probe; `--timeout` (seconds, default 3).
+- Shared code in `pandemic-common::discovery` (`advertise_node`,
+  `discover_nodes`, `DiscoveredNode`) on `agnostic-mdns` (tokio).
+
+- **Acceptance (met):** in the e2e container, starting `pandemic-node` makes it
   discoverable and `epidemic nodes --discover` lists it with the right port;
   spreading to a discovered peer behaves exactly like an explicit `--node`.
-- **Open decisions (owner to weigh in):**
-  - New crate `pandemic-discovery` vs. a `pandemic-common::discovery` module?
-    (Discovery is also useful to the daemon/console — a shared module argues
-    for `pandemic-common`.)
-  - Reuse `pandemic-udp` (already in the tree) or add a dedicated `mdns` dep?
-  - Discover-and-list only, or also auto-join a named group by name?
+  Verified two ways in `e2e/README.md`: section E (same host, over loopback) and
+  section F (two containers on a shared Docker bridge — the "creative"
+  cross-host loop), including a real `spread --discover` applying on the remote
+  container.
+- **Decisions (resolved):**
+  - **Module, not a crate:** `pandemic-common::discovery` — discovery is also
+    useful to the daemon/console, and a shared module keeps one wire source of
+    truth. (Chosen over a `pandemic-discovery` crate.)
+  - **Dedicated mDNS dep:** `agnostic-mdns` 0.4 (tokio feature) — the only
+    maintained mDNS crate with both an advertise server and a discover client.
+    `pandemic-udp` is a UDP→daemon proxy, *not* an mDNS stack, so it is not
+    reused. A `rustix/time` feature is enabled (feature unification) to work
+    around an upstream rustix 1.1.x feature-gating bug in the `net` module.
+  - **Discover-and-list + union, no auto-join:** `--discover` lists and unions
+    with the roster; auto-joining a named group is deferred to Increment 4
+    (per-node secrets/TLS make a discovered identity trustworthy enough to
+    adopt).
+
+- **Known issue:** the `agnostic-mdns`/`dns-protocol-patch` stack occasionally
+  panics on a worker thread while parsing a receive-loop packet (rare, ~1/9
+  loopback probes; non-fatal — discovery still returns the correct nodes).
+  Upstream library bug on the latest published versions; see
+  `docs/epidemic.md` → Known issues.
 
 #### Increment 3 — Multicast + targeting + canary
 
@@ -121,10 +145,12 @@ Goal: make epidemic production-grade.
 
 ### Resume point
 
-- **Next up: Increment 2 (discovery).** Start by resolving the two open
-  decisions above (crate-vs-module; `pandemic-udp` reuse vs. a new mDNS dep),
-  then add the node-side announce + coordinator `--discover` probe, and extend
-  the `e2e/README.md` epidemic section with a discovery loop.
+- **Next up: Increment 3 (multicast + targeting + canary).** Build on the
+  Increment 2 discovery: broadcast the *intent* to a multicast group, nodes
+  self-select by criteria (labels/roles/capabilities), and a canary cohort is
+  applied first. Resolve the open decisions in the Increment 3 section first
+  (multicast group address + payload schema; who evaluates criteria; canary as
+  percentage vs. named subset).
 - **The gate to pass before an increment counts as done** (mirrors CI):
   `cargo build --workspace` && `cargo clippy --workspace -- -D warnings` &&
   `cargo fmt --check` && `cargo test --workspace`.
@@ -134,13 +160,17 @@ Goal: make epidemic production-grade.
   - `pandemic-common/src/wire.rs` — `authenticate_stream` +
     `send_request_stream` (shared framing for Unix + TCP).
   - `pandemic-common/src/remote.rs` — `RemoteClient` (coordinator→node TCP).
+  - `pandemic-common/src/discovery.rs` — mDNS advertise + probe
+    (`advertise_node`, `discover_nodes`, `DiscoveredNode`, `SERVICE_FQDN`).
   - `pandemic-common/src/groups.rs` — `NodeConfig`, `GroupConfig`,
     `load_groups[_or_default]`, `find_group`, `merge_roster`,
     `default_groups_path`.
   - `pandemic-common/src/agent.rs` — `AgentClient` (local Unix), `AGENT_SECRET_PATH`.
-  - `pandemic-node/src/{main,allowlist}.rs` — the node receiver + allowlist.
+  - `pandemic-node/src/{main,allowlist}.rs` — the node receiver + allowlist +
+    mDNS announce (`--name`/`--no-advertise`, `advertise_for_listen`).
   - `pandemic-cli/src/epidemic.rs` — coordinator (`spread`/`nodes`/
-    `resolve_roster`/`apply_to_node`/`resolve_epidemic_secret`/`print_results`).
+    `resolve_roster`/`merge_discovered`/`apply_to_node`/
+    `resolve_epidemic_secret`/`print_results`).
   - `pandemic-cli/src/deployment.rs` — `resolve_deployment_plan` +
     `print_dry_run` (shared by `deployment install` **and** `epidemic spread`).
   - `pandemic-agent/src/main.rs` — agent server (shares `auth`).
