@@ -11,6 +11,13 @@ One plan, many hosts, per-node results. The agent stays a dumb executor —
 it never sees the group, the roster, or the other nodes. Only the deployment
 payload crosses the wire.
 
+There are three ways to reach the nodes, and they share the same Plan step:
+spread to an **explicit roster** (`--node` / `--group`), **discover** the
+roster over mDNS (`--discover`), or **broadcast the intent** over a multicast
+group and let each node self-select (`--broadcast`). All three end the same
+way — the node authenticates the coordinator, receives the one concrete plan,
+and applies it through its local agent.
+
 ## The primitive: node / group / coordinator
 
 The feature is built on three small ideas, not on a bespoke protocol:
@@ -110,6 +117,10 @@ Flags:
 | `--agent-secret` / `--agent-secret-path` | — | Agent (local) shared secret, inline or file |
 | `--name` | hostname | mDNS instance name the node advertises under (see Discovery) |
 | `--no-advertise` | off | Disable mDNS advertisement entirely |
+| `--no-multicast` | off | Do not join the multicast intent group (broadcast spread off) |
+| `--multicast-group` | `239.255.77.11` | Multicast group to join for broadcast intents (see Broadcast) |
+| `--multicast-port` | `7712` | UDP port for broadcast intents |
+| `--label KEY=VALUE` | — | Operator label for broadcast targeting (repeatable; see Broadcast) |
 
 ### Discovery (mDNS / Bonjour)
 
@@ -133,6 +144,110 @@ A loopback bind (`--listen 127.0.0.1:…`, the default) advertises on loopback,
 so it is only discoverable from the same host — the safe default for local
 testing. Bind `0.0.0.0` to make the node discoverable (and reachable) on the
 LAN.
+
+### Broadcast (multicast intent + targeting + canary)
+
+Instead of the coordinator dialing each node, it **broadcasts a short intent**
+to a multicast group and lets each node decide for itself whether it is a
+target. The intent is **not** the deployment: it carries no payload and no
+secret — only the *plan's identity*, the *targeting criteria*, the *canary
+cohort*, and a *token* that proves the issuer holds the group's epidemic
+secret. A node that selects itself dials the coordinator back over TCP and
+receives the one concrete plan, exactly as in a roster spread.
+
+This is the "subnet-wide" mode: one UDP datagram reaches every listener on the
+link, and each node does its own matching locally, so the coordinator never
+needs a roster.
+
+**The node side.** By default a node **joins the intent group** (alongside its
+TCP listener and its mDNS advertisement) on the interface that matches
+`--listen`, and holds that join for the process lifetime. It uses the same
+epidemic secret as the roster path. `--no-multicast` opts out; a failed join is
+a warning and the TCP surface is unaffected.
+
+**The token — group membership, in cleartext.** The intent's `token` is
+`HMAC-SHA256(epidemic_secret, spread_id)` — the same HMAC primitive as the wire
+handshake, with the `spread_id` playing the role of the nonce. A node verifies
+the token against its *own* epidemic secret before doing anything else; a node
+holding a different secret (or none) drops the intent. That is what keeps a
+broadcast from being applied by an out-of-group node, and it costs the
+coordinator nothing — it already holds the secret.
+
+**Targeting criteria.** The intent carries `key=value` criteria (AND
+semantics; an empty list matches every node). A node matches them against its
+own identity:
+
+- `name=web-1` — the node's `--name` (or hostname);
+- `role=edge`, `env=prod`, … — operator labels set with the node's `--label`;
+- `cap:mqtt=true` — a capability the node's local agent reports (the node fetches
+  capabilities lazily, only when an intent tests a `cap:` entry).
+
+**Canary.** A canary intent (`stage = canary`) adds a cohort — only nodes in
+the cohort apply. Two forms:
+
+- `--canary 25` — a **percentage**. The cohort is a stateless hash bucket: the
+  first two hex bytes of `HMAC(secret, spread_id ‖ "|" ‖ node_name)`, mod 100 —
+  deterministic per (secret, spread, node), uniform across nodes, and it needs
+  no fleet view.
+- `--canary role=canary` — a **named subset**: one extra criterion a node must
+  also match.
+
+**Promote.** Promotion is a re-broadcast of the **same** `spread_id` at
+`stage = full`. Nodes that already applied that id de-duplicate it; nodes that
+were in the canary cohort have already applied, and nodes that were *not* in
+the cohort now apply. So canary → promote is "the first cohort, then everyone
+else," with no double-apply.
+
+```bash
+# 1. Canary to a named subset first (only nodes labelled role=canary apply).
+pandemic-cli epidemic spread ./webapp/deployment.toml \
+  --broadcast --interface 192.168.1.5 --canary role=canary --spread-id edge-rollout
+
+# 2. Looks good? Promote the same rollout to every matching node.
+pandemic-cli epidemic spread ./webapp/deployment.toml \
+  --broadcast --interface 192.168.1.5 --promote --spread-id edge-rollout
+
+# Or a percentage canary (a 25% hash bucket), then promote.
+pandemic-cli epidemic spread ./webapp/deployment.toml \
+  --broadcast --interface 192.168.1.5 --canary 25 --spread-id web-rollout
+pandemic-cli epidemic spread ./webapp/deployment.toml \
+  --broadcast --interface 192.168.1.5 --promote --spread-id web-rollout
+
+# Target by label, no canary (every node with role=edge applies).
+pandemic-cli epidemic spread ./webapp/deployment.toml \
+  --broadcast --interface 192.168.1.5 --criteria role=edge
+
+# Recent broadcast history (newest first); shows each spread_id for --promote.
+pandemic-cli epidemic spreads
+pandemic-cli epidemic spreads --limit 5
+```
+
+**Broadcast flags** (all `--broadcast`-only — they are rejected on a roster
+spread):
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--broadcast` | off | Spread over the multicast intent group instead of a roster |
+| `--criteria KEY=VALUE` | (all nodes) | Targeting criterion (repeatable, AND): `name=`, a label, or `cap:X=true` |
+| `--canary <N\|KEY=VALUE>` | — | Canary cohort: a percentage (`25`) or a subset criterion (`role=canary`) |
+| `--promote` | off | Re-broadcast `--spread-id` at Full (promote a prior canary) |
+| `--spread-id <ID>` | generated | Fixed spread id (required for `--promote`). See `epidemic spreads` |
+| `--multicast-group` | `239.255.77.11` | Multicast group (site-local) to broadcast on |
+| `--multicast-port` | `7712` | UDP port to broadcast on |
+| `--wait` | `15` | Seconds to wait for node callbacks before reporting |
+
+The coordinator binds a callback listener on an ephemeral port, sets its own
+LAN IPv4 (from `--interface`, else the primary LAN address) as the intent's
+`origin`, and re-sends the intent a few times (UDP is best-effort; the node
+de-duplicates by `spread_id`). A node that selects itself dials `origin:port`,
+handshakes with the epidemic secret, receives the one concrete plan (whose
+`sha256` must match the intent's `plan.sha256`), and applies it. A canary or
+promote that reaches **no** node is a **failure** (non-zero exit) — except a
+promote that finds everyone already applied, which is a benign no-op.
+
+The multicast group `239.255.77.11` (port `7712`, TTL 1) sits in the
+site-local, non-assignable range so it stays on the link; change it with
+`--multicast-group` / `--multicast-port` if it collides.
 
 ### The narrow surface
 
@@ -180,7 +295,17 @@ pandemic-cli epidemic nodes --group edge
 pandemic-cli epidemic nodes --discover --interface 192.168.1.0
 pandemic-cli epidemic spread ./webapp/deployment.toml --discover
 pandemic-cli epidemic spread ./webapp/deployment.toml --discover --dry-run
+
+# Broadcast (multicast): no roster — nodes self-select on the intent.
+# Canary to a subset first, then promote the same rollout to everyone.
+pandemic-cli epidemic spread ./webapp/deployment.toml --broadcast \
+  --interface 192.168.1.5 --canary role=canary --spread-id rollout
+pandemic-cli epidemic spread ./webapp/deployment.toml --broadcast \
+  --interface 192.168.1.5 --promote --spread-id rollout
 ```
+
+The full broadcast flag set, targeting criteria, canary/promote semantics, and
+`epidemic spreads` are in the [Broadcast section](#broadcast-multicast-intent--targeting--canary).
 
 ### Discovery flags
 
@@ -265,6 +390,14 @@ node, and a node never learns about its peers.
 - **Two secrets, two boundaries.** The epidemic secret only authorizes the
   network hop; the agent secret only authorizes the local hop. Keep them
   distinct per group.
+- **Broadcast is intent-only, and the token gates it.** The multicast
+  datagram carries no payload or secret — only the plan's identity, the
+  criteria, the canary cohort, and `token = HMAC-SHA256(epidemic_secret,
+  spread_id)`. A node verifies that token against its own epidemic secret
+  before acting, so a broadcast only ever reaches nodes that already hold the
+  group's secret. The full plan still crosses an authenticated TCP connection
+  (node → coordinator callback), and its `sha256` must match the intent's
+  before it is applied.
 - **Narrow allowlist.** A node can only be told to deploy/inspect deployments.
   There is no remote user/package/file primitive on the wire.
 - **No values on the wire beyond the plan.** The coordinator sends the
@@ -278,7 +411,11 @@ node, and a node never learns about its peers.
   before exposing it on untrusted networks. Signatures are the shared
   production gate with the registry (see `ideas/epidemic_infections.md`).
 - **Default bind is loopback.** `pandemic-node` listens on `127.0.0.1` by
-  default. Bind `0.0.0.0` deliberately and firewall port `7711`.
+  default. Bind `0.0.0.0` deliberately and firewall port `7711`. Broadcast is
+  on by default too, so a bound node will also self-select intents on the
+  `239.255.77.11:7712` group — disable it with `--no-multicast` (or point it
+  elsewhere with `--multicast-group`/`--multicast-port`) when a host should
+  only accept explicit roster spreads.
 
 ## Roadmap
 
@@ -288,7 +425,9 @@ The larger epidemic vision (discovery, multicast, reliability) is tracked in
 1. **Node / group / coordinator + TCP spread** — *done*.
 2. **Discovery** — mDNS/Bonjour so the coordinator doesn't hand-type the roster
    — *done* (node advertises; `epidemic nodes/spread --discover`).
-3. **Multicast + targeting** — subnet-wide spread, target criteria, canary.
+3. **Multicast + targeting + canary** — subnet-wide spread, criteria targeting,
+   canary + promote — *done* (node joins the intent group;
+   `epidemic spread --broadcast`; `epidemic spreads` history).
 4. **Reliability + hardening** — retries, sender-side audit, rate limiting,
    per-node secrets, TLS, payload signing.
 

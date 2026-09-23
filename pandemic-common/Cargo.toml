@@ -24,6 +24,9 @@ rand = "0.8"
 subtle = "2.6"
 # Epidemic discovery (increment 2): mDNS advertise (node) + probe (coordinator).
 agnostic-mdns = { workspace = true }
+# Epidemic broadcast (increment 3): raw UDP multicast socket (SO_REUSEADDR
+# join) for spread intents.
+socket2 = "0.5"
 # agnostic-mdns -> agnostic-net enables rustix with only the `net` feature, but
 # rustix >= 1.1.5 compiles `net/sockopt.rs` against `crate::timespec`, which
 # needs the `time` feature (upstream feature-gating bug). Enabling `time` here

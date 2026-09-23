@@ -53,8 +53,8 @@ Epidemic infections enable configuration and updates to "spread" across pandemic
 |---|---|---|---|
 | 1 | Node / group / coordinator + reliable TCP spread | Foundation | **done** (v0.5.0) |
 | 2 | Discovery (mDNS/Bonjour) — roster discovery | Level 1 | **done** |
-| 3 | Multicast + targeting + canary | Level 2 | planned — **next** |
-| 4 | Reliability + hardening (retries, audit, rate-limit, per-node secrets, TLS, signing) | Level 3 + Phase 4 | planned |
+| 3 | Multicast + targeting + canary | Level 2 | **done** |
+| 4 | Reliability + hardening (retries, audit, rate-limit, per-node secrets, TLS, signing) | Level 3 + Phase 4 | planned — **next** |
 
 #### Increment 1 — Node / group / coordinator + reliable TCP spread — **done**
 
@@ -112,21 +112,78 @@ Shipped:
   Upstream library bug on the latest published versions; see
   `docs/epidemic.md` → Known issues.
 
-#### Increment 3 — Multicast + targeting + canary
+#### Increment 3 — Multicast + targeting + canary — **done**
 
 Goal: subnet-wide spread with **criteria targeting** and a **canary** rollout,
 on top of Increment 2 discovery.
 
-- Broadcast the *intent* to a multicast group; nodes self-select by matching
-  criteria (labels/roles/capabilities) against their own identity.
-- **Canary:** apply to a named subset or a percentage first, then the rest; the
-  coordinator reports per-cohort results.
-- **Acceptance:** a multicast spread reaches every matching node on the test
-  subnet, non-matching nodes are untouched, and a canary spread applies to the
-  first cohort only until promoted.
-- **Open decisions:** the multicast group address + payload schema; the
-  criteria-matching semantics (who evaluates — node vs. coordinator); canary as
-  percentage vs. named subset.
+Shipped:
+- **Intent-only multicast.** `pandemic-common::multicast` (`send_intent`,
+  `IntentListener`): a short JSON `SpreadIntent` over UDP multicast — group
+  `239.255.77.11`, port `7712`, TTL 1, loop on, re-sent `INTENT_RESENDS=3`
+  times. The intent carries **no payload and no secret** — only the plan's
+  identity (`name`/`version`/`sha256`), the targeting criteria, the canary
+  cohort, the coordinator's `origin:callback_port`, and a **token**.
+- **The token = group membership.** `token = HMAC-SHA256(epidemic_secret,
+  spread_id)` — the same HMAC primitive as the wire handshake (the `spread_id`
+  plays the nonce role). A node verifies it against its *own* secret before any
+  action; a wrong/absent secret ⇒ the intent is dropped. Pure logic lives in
+  `pandemic-common::intent` (token, freshness, criteria, canary cohort) so both
+  sides — and the tests — agree.
+- **Node self-selection.** `pandemic-node` joins the intent group by default
+  (on the interface matching `--listen`), held for the process lifetime;
+  `--no-multicast` opts out (TCP surface unaffected). On each intent it checks,
+  in order: protocol version → token → freshness (60s) → dedupe (applied set)
+  → criteria → canary cohort. Only a selected node dials the coordinator back
+  (`pandemic-node/src/spread.rs`), reusing the **stable** wire handshake
+  (node = client) and a one-`BufReader`-per-connection line model. It verifies
+  `sha256(wire_line) == intent.plan.sha256` before applying through the agent.
+- **Criteria + canary.** `key=value` criteria (AND; empty = all): `name=X`, a
+  node label (`--label`), or `cap:X=true` (fetched lazily). Canary cohort is a
+  **percentage** (stateless hash bucket — first 2 hex bytes of
+  `HMAC(secret, spread_id ‖ "|" ‖ node_name)` mod 100) or a **named subset**
+  (one extra criterion). **Promote** = re-broadcast the same `spread_id` at
+  Full; the node de-duplicates by `spread_id`, so canary→promote applies "first
+  cohort, then everyone else" with no double-apply.
+- **Coordinator + history.** `epidemic spread --broadcast` binds an ephemeral
+  callback listener, sets its LAN IPv4 as `origin`, broadcasts, and collects
+  per-node `Response`s. `epidemic spreads` lists recent broadcast history
+  (newest first, `--limit`) from `~/.local/state/pandemic/spread-history.log` —
+  the source of `--spread-id` for `--promote`. A canary/promote that reaches no
+  node is a **failure** (non-zero), except a promote that finds everyone
+  already applied (benign no-op).
+
+- **Acceptance (met):** on the two-container bridge, a Full broadcast applies
+  the plan **on B** (file + `deployment status` present on B, absent on A);
+  canary `0%` is ignored, `100%` applies; a subset cohort applies for a matching
+  `--label` and is ignored otherwise; a canary that excludes B is applied by the
+  subsequent `--promote` of the same `spread_id`; re-sends de-duplicate; a node
+  with a **different epidemic secret** rejects the intent
+  (`token does not match`); `epidemic spreads` records every stage. See
+  `e2e/README.md` → section **F.2** (the verified cross-host loop) and
+  `docs/epidemic.md` → Broadcast.
+- **Decisions (resolved):**
+  - **Node-side evaluation, not coordinator-side.** The coordinator broadcasts
+    an intent and never learns who applied; the node does all matching locally
+    against its own identity. Keeps the roster-free model and the narrow-surface
+    guarantee (a node is never told *who else* is in the group).
+  - **Canary = percentage OR named subset** (both supported), not one or the
+    other. Percentage is a stateless hash bucket (no fleet view); subset is an
+    extra criterion. Promote re-broadcasts the same `spread_id` at Full.
+  - **Group + port + defaults:** site-local, non-assignable multicast group
+    `239.255.77.11`, port `7712`, TTL 1, loop on, 3 re-sends. Overridable per
+    side (`--multicast-group` / `--multicast-port`); documented.
+  - **Intent, not payload, on the wire.** The full plan still crosses the
+    authenticated node→coordinator TCP callback and its `sha256` must match the
+    intent's — so multicast adds no new cleartext-payload exposure beyond the
+    already-documented "authenticated, not encrypted" posture.
+- **Gate green:** `cargo build --workspace`, `clippy --workspace -- -D
+  warnings`, `cargo fmt --check`, `cargo test --workspace` (239 passing, 26
+  suites). New pure-logic tests: intent token/freshness/criteria/canary
+  (`pandemic-common::intent`), node `decide_intent` + callback
+  (`pandemic-node::spread`), multicast loopback round-trip
+  (`pandemic-common::multicast`), and the coordinator flag/record/timestamp
+  tests (`pandemic-cli::epidemic`).
 
 #### Increment 4 — Reliability + hardening
 
@@ -145,12 +202,11 @@ Goal: make epidemic production-grade.
 
 ### Resume point
 
-- **Next up: Increment 3 (multicast + targeting + canary).** Build on the
-  Increment 2 discovery: broadcast the *intent* to a multicast group, nodes
-  self-select by criteria (labels/roles/capabilities), and a canary cohort is
-  applied first. Resolve the open decisions in the Increment 3 section first
-  (multicast group address + payload schema; who evaluates criteria; canary as
-  percentage vs. named subset).
+- **Next up: Increment 4 (reliability + hardening).** TLS on the
+  coordinator→node hop (rustls), per-node secrets / mTLS identity, retries +
+  idempotency, a sender-side audit entry per spread, rate limiting, and
+  **payload signing** (the production gate, shared with the registry). See the
+  Increment 4 section above for scope and acceptance.
 - **The gate to pass before an increment counts as done** (mirrors CI):
   `cargo build --workspace` && `cargo clippy --workspace -- -D warnings` &&
   `cargo fmt --check` && `cargo test --workspace`.
@@ -162,19 +218,31 @@ Goal: make epidemic production-grade.
   - `pandemic-common/src/remote.rs` — `RemoteClient` (coordinator→node TCP).
   - `pandemic-common/src/discovery.rs` — mDNS advertise + probe
     (`advertise_node`, `discover_nodes`, `DiscoveredNode`, `SERVICE_FQDN`).
+  - `pandemic-common/src/multicast.rs` — `send_intent` + `IntentListener`
+    (the UDP multicast transport; `DEFAULT_MULTICAST_GROUP`/`PORT`, TTL, re-sends).
+  - `pandemic-common/src/intent.rs` — the **pure** broadcast decision logic:
+    intent token, freshness, `Criterion` parse/match, canary cohort
+    (percentage bucket + subset), `NodeIdentity`. Shared by both sides + tests.
   - `pandemic-common/src/groups.rs` — `NodeConfig`, `GroupConfig`,
     `load_groups[_or_default]`, `find_group`, `merge_roster`,
     `default_groups_path`.
   - `pandemic-common/src/agent.rs` — `AgentClient` (local Unix), `AGENT_SECRET_PATH`.
   - `pandemic-node/src/{main,allowlist}.rs` — the node receiver + allowlist +
     mDNS announce (`--name`/`--no-advertise`, `advertise_for_listen`).
+  - `pandemic-node/src/spread.rs` — the node's intent recv loop: `decide_intent`
+    (version→token→freshness→dedupe→criteria→canary), `run_intent_listener`,
+    `act_on_intent` (dial callback, verify `plan.sha256`, apply).
   - `pandemic-cli/src/epidemic.rs` — coordinator (`spread`/`nodes`/
     `resolve_roster`/`merge_discovered`/`apply_to_node`/
-    `resolve_epidemic_secret`/`print_results`).
+    `resolve_epidemic_secret`/`print_results`) **and** the broadcast path
+    (`run_broadcast`/`build_intent`/`serve_one_callback`/`report_and_record`,
+    `epidemic spreads` history).
   - `pandemic-cli/src/deployment.rs` — `resolve_deployment_plan` +
     `print_dry_run` (shared by `deployment install` **and** `epidemic spread`).
   - `pandemic-agent/src/main.rs` — agent server (shares `auth`).
-  - `pandemic-protocol/` — `AgentRequest`, `Response`, `AuthChallenge`/`AuthResponse`.
+  - `pandemic-protocol/` — `AgentRequest`, `Response`, `AuthChallenge`/
+    `AuthResponse`, **and** the broadcast types `SpreadStage`, `Canary`,
+    `PlanIdentity`, `SpreadIntent`.
   - How-to: `docs/epidemic.md`; operator loop: `e2e/README.md` (epidemic section).
 
 ---

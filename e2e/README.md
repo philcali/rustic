@@ -888,7 +888,96 @@ docker exec -u root epi-b pandemic-cli deployment status hello  # → hello v1.0
 
 Expected: A discovers B's `epi-b-node` (B's bridge IP) and the deployment is
 applied **on B** — the plan crossed the bridge, B's node authenticated with the
-shared epidemic secret and forwarded to B's agent (agent secret). Teardown:
+shared epidemic secret and forwarded to B's agent (agent secret).
+
+### F.2 Broadcast (multicast + targeting + canary) — same two containers
+
+Same two-container setup as F (steps 1–4 above: `epi-lan` bridge, binaries in
+both, B's agent + shared epidemic secret, B's node bound to `0.0.0.0`). The
+only difference from F: **no `--discover`** — the coordinator broadcasts an
+intent over the multicast group and B's node **self-selects** and dials A back.
+B's node joins the intent group by default (no flag needed). This is the
+"creative" cross-host loop for the multicast path.
+
+```bash
+# 0. (From F, already done) B's node is running:
+#    docker exec -u root -d epi-b pandemic-node --listen 0.0.0.0:7711 --name epi-b-node
+#    ...and the spec is on A at /opt/specs/hello/deployment.toml (step 6 of F).
+A_IP=$(docker exec epi-a hostname -I | awk '{print $1}')
+
+# 1. Full broadcast (no canary): B self-selects and applies.
+docker exec -u root epi-a pandemic-cli \
+  epidemic spread /opt/specs/hello/deployment.toml --broadcast --interface "$A_IP" --wait 20
+#   →  ✓  172.x.0.3:xxxxx  applied
+#   →  ✅ broadcast 'hello' as full — 1 applied, 0 failed (spread_id=…)
+
+# 2. It landed on B (not A).
+docker exec epi-b cat /opt/hello-from-a.txt                 # → the spec's payload
+docker exec -u root epi-b pandemic-cli deployment status hello   # → hello v1.0.0 installed
+
+# 3. Canary 0% — B is OUT of the cohort, so nothing applies (non-zero exit).
+docker exec -u root epi-a pandemic-cli \
+  epidemic spread /opt/specs/hello/deployment.toml --broadcast --interface "$A_IP" \
+  --canary 0 --spread-id canaryzero000 --wait 4
+#   →  Error: no node applied the canary spread (0 callback(s)) …   (exit 1)
+
+# 4. Canary 100% — B is IN the cohort, so it applies.
+docker exec -u root epi-a pandemic-cli \
+  epidemic spread /opt/specs/hello/deployment.toml --broadcast --interface "$A_IP" \
+  --canary 100 --spread-id canary100000 --wait 8
+#   →  ✅ broadcast 'hello' as canary — 1 applied, 0 failed (spread_id=canary100000)
+
+# 5. Canary subset. Restart B's node with a label, then target it:
+docker exec -u root epi-b pkill -f pandemic-node 2>/dev/null || true
+docker exec -u root -d epi-b bash -c 'RUST_LOG=debug pandemic-node --listen 0.0.0.0:7711 \
+  --name epi-b-node --label role=canary > /tmp/node.log 2>&1'
+docker exec -u root epi-a pandemic-cli \
+  epidemic spread /opt/specs/hello/deployment.toml --broadcast --interface "$A_IP" \
+  --canary role=canary --spread-id subsetin000 --wait 8      # → 1 applied (B has the label)
+docker exec -u root epi-a pandemic-cli \
+  epidemic spread /opt/specs/hello/deployment.toml --broadcast --interface "$A_IP" \
+  --canary role=other  --spread-id subsetout00 --wait 4      # → 0 applied (B lacks the label)
+
+# 6. Promote: a canary that EXCLUDES B, then re-broadcast the same id at Full.
+SID=promoteme01
+docker exec -u root epi-a pandemic-cli \
+  epidemic spread /opt/specs/hello/deployment.toml --broadcast --interface "$A_IP" \
+  --canary role=other --spread-id "$SID" --wait 4            # → 0 applied (excluded)
+docker exec -u root epi-a pandemic-cli \
+  epidemic spread /opt/specs/hello/deployment.toml --broadcast --interface "$A_IP" \
+  --promote --spread-id "$SID" --wait 8                      # → 1 applied (now Full)
+#   →  ✅ broadcast 'hello' as promote — 1 applied, 0 failed (spread_id=promoteme01)
+
+# 7. B's decision log (debug) shows the exact reasons — selected vs. ignored:
+docker exec epi-b bash -c 'grep -E "selected|ignored" /tmp/node.log | tail -12'
+#   →  intent canary100000: selected — dialing callback at 172.x.0.2:…
+#   →  intent canary100000: applied
+#   →  intent subsetout00: ignored (not in the canary cohort)
+#   →  intent promoteme01: ignored (not in the canary cohort)   [canary stage]
+#   →  intent promoteme01: selected — dialing callback …          [promote stage]
+#   →  intent <id>: ignored (spread already applied)             [dedupe on re-send]
+
+# 8. Broadcast history on A (newest first); spread_ids feed --promote.
+docker exec -u root epi-a pandemic-cli epidemic spreads
+docker exec -u root epi-a pandemic-cli epidemic spreads --limit 3
+#   →  2026-…  ✓  hello v1.0.0  applied=1/1  ok=true   (stage=promote, canary, …)
+
+# 9. Security: a node with a DIFFERENT epidemic secret must reject the intent.
+docker exec -u root epi-b pkill -f pandemic-node 2>/dev/null || true
+docker exec -u root -d epi-b bash -c 'RUST_LOG=debug pandemic-node --listen 0.0.0.0:7711 \
+  --name epi-b-node --secret "a-different-secret" > /tmp/node.log 2>&1'
+docker exec -u root epi-a pandemic-cli \
+  epidemic spread /opt/specs/hello/deployment.toml --broadcast --interface "$A_IP" \
+  --spread-id secretmism0 --wait 4
+#   →  Error: no node applied the full spread (0 callback(s)) …  (exit 1)
+docker exec epi-b bash -c 'grep secretmism0 /tmp/node.log'
+#   →  intent secretmism0: ignored (token does not match this node's group secret)
+```
+
+Expected: the broadcast intent crosses the bridge over the shared multicast
+group, B's node self-selects (token, criteria, canary cohort, dedupe) and dials
+A back; the plan applies **on B**. Out-of-cohort, wrong-secret, and unknown
+spreads are each ignored for a specific logged reason. Teardown:
 `docker rm -f epi-a epi-b && docker network rm epi-lan`.
 
 ### Teardown

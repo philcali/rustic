@@ -19,8 +19,16 @@
 //! it with `pandemic-cli epidemic nodes --discover` instead of a hand-typed
 //! roster. Disable with `--no-advertise`; the TCP surface is unaffected
 //! either way.
+//!
+//! **Broadcast (increment 3):** the node also joins a multicast intent group
+//! (default `239.255.77.11:7712`) and self-selects on any spread intent it
+//! hears — verifying the issuer holds the group secret, then applying the
+//! plan through the local agent and dialing the coordinator back. See
+//! [`spread`]. Disable with `--no-multicast`; the TCP surface is unaffected
+//! either way.
 
 mod allowlist;
+mod spread;
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -30,7 +38,7 @@ use tracing::{error, info, warn};
 
 use anyhow::Result;
 use clap::Parser;
-use pandemic_common::{auth, discovery, AgentClient};
+use pandemic_common::{auth, discovery, AgentClient, IntentListener};
 use pandemic_protocol::{AgentRequest, AuthChallenge, AuthResponse, Response};
 
 use allowlist::request_allowed;
@@ -75,6 +83,24 @@ pub struct Args {
     /// Path to a file holding the local agent shared secret.
     #[arg(long)]
     pub agent_secret_path: Option<PathBuf>,
+
+    /// Do not join the multicast intent group (broadcast spread is disabled;
+    /// explicit roster spreads over the TCP surface still reach this node).
+    #[arg(long)]
+    pub no_multicast: bool,
+
+    /// Multicast group to join for broadcast spread intents (site-local).
+    #[arg(long, default_value_t = pandemic_common::DEFAULT_MULTICAST_GROUP)]
+    pub multicast_group: Ipv4Addr,
+
+    /// UDP port for broadcast spread intents.
+    #[arg(long, default_value_t = pandemic_common::DEFAULT_MULTICAST_PORT)]
+    pub multicast_port: u16,
+
+    /// Operator-declared label for broadcast targeting, `KEY=VALUE`
+    /// (repeatable; matched by `key=value` intent criteria).
+    #[arg(long = "label", value_name = "KEY=VALUE")]
+    pub label: Vec<String>,
 }
 
 #[tokio::main]
@@ -107,6 +133,9 @@ async fn main() -> Result<()> {
         args.listen, args.agent_socket
     );
 
+    let node_name = args.name.clone().unwrap_or_else(default_node_name);
+    let labels = spread::parse_labels(&args.label)?;
+
     // Discovery (increment 2): advertise alongside the TCP listener, on the
     // interface matching --listen, so a coordinator on the same link finds
     // this node. Advertise failure is not fatal — the TCP surface keeps
@@ -116,8 +145,7 @@ async fn main() -> Result<()> {
     let _advertiser = if args.no_advertise {
         None
     } else {
-        let name = args.name.clone().unwrap_or_else(default_node_name);
-        match advertise_for_listen(&args.listen, &name).await {
+        match advertise_for_listen(&args.listen, &node_name).await {
             Ok(server) => Some(server),
             Err(e) => {
                 warn!("mDNS advertise failed; node will not be discoverable: {e}");
@@ -125,6 +153,44 @@ async fn main() -> Result<()> {
             }
         }
     };
+
+    // Broadcast (increment 3): join the multicast intent group on the
+    // interface matching --listen so the node hears spread intents and can
+    // self-select. Join failure is not fatal — the TCP surface (and explicit
+    // roster spreads) keeps working. The join is held for the process
+    // lifetime by the spawned task: dropping it leaves the group.
+    if !args.no_multicast {
+        let join = interface_for_listen(&args.listen).and_then(|iface| {
+            IntentListener::join(args.multicast_group, args.multicast_port, iface)
+                .map(|listener| (listener, iface))
+        });
+        match join {
+            Ok((listener, iface)) => {
+                info!(
+                    "pandemic-node joined intent group {}:{} on {iface} (broadcast spread on)",
+                    args.multicast_group, args.multicast_port
+                );
+                let mname = node_name.clone();
+                let mlabels = labels.clone();
+                let msecret = epidemic_secret.clone();
+                let msocket = args.agent_socket.clone();
+                let magent_secret = agent_secret.clone();
+                tokio::spawn(async move {
+                    let agent_client =
+                        AgentClient::with_socket_path(msocket).with_secret(magent_secret);
+                    if let Err(e) =
+                        spread::run_intent_listener(listener, mname, mlabels, msecret, agent_client)
+                            .await
+                    {
+                        warn!("intent listener ended: {e}");
+                    }
+                });
+            }
+            Err(e) => {
+                warn!("multicast join failed; node will not receive broadcast intents: {e}");
+            }
+        }
+    }
 
     loop {
         match listener.accept().await {
@@ -145,31 +211,37 @@ async fn main() -> Result<()> {
     }
 }
 
-/// Start the mDNS advertiser for the `--listen` address:
+/// The local IPv4 the multicast group / mDNS advertise should bind to, given
+/// `--listen`:
 ///
-///   * `127.0.0.1:7711` — advertise `127.0.0.1:7711` on loopback (the
-///     e2e spread-to-self path);
-///   * `0.0.0.0:7711`   — advertise the primary LAN IPv4 on that interface;
-///   * `<ip>:7711`      — advertise that IP on its interface.
-async fn advertise_for_listen(listen: &str, name: &str) -> Result<discovery::Advertiser> {
+///   * `127.0.0.1:7711` — loopback (the e2e spread-to-self path);
+///   * `0.0.0.0:7711`   — the primary LAN IPv4;
+///   * `<ip>:7711`      — that IP.
+fn interface_for_listen(listen: &str) -> Result<Ipv4Addr> {
     let addr: SocketAddr = listen
         .parse()
         .map_err(|e| anyhow::anyhow!("parsing --listen '{listen}': {e}"))?;
-    let port = addr.port();
     match addr.ip() {
-        IpAddr::V4(v4) if v4.is_unspecified() => {
-            let lan = primary_lan_ip().ok_or_else(|| {
-                anyhow::anyhow!("--listen 0.0.0.0 but no LAN IPv4 interface to advertise on")
-            })?;
-            discovery::advertise_node(name, IpAddr::V4(lan), port, lan).await
-        }
-        IpAddr::V4(v4) => discovery::advertise_node(name, IpAddr::V4(v4), port, v4).await,
+        IpAddr::V4(v4) if v4.is_unspecified() => primary_lan_ip()
+            .ok_or_else(|| anyhow::anyhow!("--listen 0.0.0.0 but no LAN IPv4 interface to use")),
+        IpAddr::V4(v4) => Ok(v4),
         IpAddr::V6(_) => {
             anyhow::bail!(
-                "mDNS advertise is IPv4-only; use an IPv4 --listen (the TCP surface is unaffected)"
+                "multicast/mDNS is IPv4-only; use an IPv4 --listen (the TCP surface is unaffected)"
             )
         }
     }
+}
+
+/// Start the mDNS advertiser for the `--listen` address on the interface
+/// that [`interface_for_listen`] resolves to.
+async fn advertise_for_listen(listen: &str, name: &str) -> Result<discovery::Advertiser> {
+    let port = listen
+        .parse::<SocketAddr>()
+        .map_err(|e| anyhow::anyhow!("parsing --listen '{listen}': {e}"))?
+        .port();
+    let iface = interface_for_listen(listen)?;
+    discovery::advertise_node(name, IpAddr::V4(iface), port, iface).await
 }
 
 /// The local IPv4 the kernel would route to a public destination — i.e. the

@@ -5,6 +5,8 @@ pub mod auth;
 pub mod client;
 pub mod discovery;
 pub mod groups;
+pub mod intent;
+pub mod multicast;
 pub mod registry;
 pub mod remote;
 pub mod resolve;
@@ -24,6 +26,14 @@ pub use client::{DaemonClient, PersistentClient};
 pub use discovery::{advertise_node, discover_nodes, Advertiser, DiscoveredNode, SERVICE_FQDN};
 pub use groups::{
     default_groups_path, find_group, load_groups, load_groups_or_default, GroupConfig, NodeConfig,
+};
+pub use intent::{
+    cohort_bucket, generate_spread_id, in_canary_cohort, intent_is_fresh, intent_token,
+    needs_capabilities, parse_criteria, verify_intent_token, Criterion, NodeIdentity,
+    INTENT_FRESHNESS, INTENT_VERSION,
+};
+pub use multicast::{
+    send_intent, IntentListener, DEFAULT_MULTICAST_GROUP, DEFAULT_MULTICAST_PORT, INTENT_RESENDS,
 };
 pub use registry::{
     extract_bundle, verify_sha256, InfectionManifest, InfectionSummary, RegistryClient,

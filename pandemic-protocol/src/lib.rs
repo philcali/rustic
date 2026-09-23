@@ -484,6 +484,93 @@ impl Response {
     }
 }
 
+// ── Epidemic broadcast (increment 3): multicast spread intent ─────────────
+//
+// A broadcast spread carries only the *intent* over the multicast group — a
+// small cleartext datagram with no payload and no secret. It carries a
+// `token = HMAC-SHA256(epidemic_secret, spread_id)`, so only nodes holding
+// the group's secret act on it. The plan payload still travels the usual
+// authenticated wire on the callback connection, with the roles flipped:
+// the node dials the coordinator, signs its challenge, and receives the
+// `ApplyDeployment` request it applies through its local agent.
+
+/// Which stage of a broadcast a datagram is in. A canary spread is broadcast
+/// twice: first at [`SpreadStage::Canary`] (only the canary cohort acts),
+/// then — once promoted — at [`SpreadStage::Full`] (every matching node that
+/// has not applied yet).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SpreadStage {
+    /// Only the canary cohort should apply.
+    Canary,
+    /// Every matching node applies (a promoted canary, or a non-canary
+    /// spread).
+    Full,
+}
+
+/// The canary cohort definition (carried in both stages of a canary spread;
+/// evaluated only at [`SpreadStage::Canary`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Canary {
+    /// Roughly the first `pct` percent of the matching nodes. Membership is
+    /// stateless: a node is in the cohort when its bucket
+    /// (`HMAC(secret, spread_id ‖ node_name)`, see the shared intent module)
+    /// is below `pct` — each node decides for itself, no fleet view needed.
+    Percentage { pct: u8 },
+    /// The matching nodes whose identity additionally matches `criterion`
+    /// (a `key=value` targeting criterion, e.g. `role=canary`).
+    Subset { criterion: String },
+}
+
+/// The plan's identity as carried in the intent — *not* the payload.
+/// `sha256` is the digest of the canonical JSON of the `ApplyDeployment`
+/// request that follows on the callback connection, so a node detects a
+/// mismatch instead of applying an unexpected plan.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanIdentity {
+    pub name: String,
+    pub version: String,
+    pub sha256: String,
+}
+
+/// A broadcast spread intent: one datagram, sent to the site-local
+/// multicast group (default `239.255.77.11:7712`, TTL 1 — it stays on the
+/// link).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub struct SpreadIntent {
+    /// Schema version. Currently `1`; nodes ignore higher versions.
+    pub version: u32,
+    /// Stable across the canary broadcast and its promotion. A node's
+    /// de-duplication key: each node applies a given `spread_id` at most
+    /// once.
+    pub spread_id: String,
+    /// Who should act on this datagram.
+    pub stage: SpreadStage,
+    /// Unix seconds when the coordinator issued the intent. Nodes reject
+    /// intents outside the freshness window (replay guard, clock-skew
+    /// tolerant).
+    pub issued_at: i64,
+    /// `HMAC-SHA256(epidemic_secret, spread_id)`, hex. Proves the issuer
+    /// holds the group's secret; the secret itself never appears.
+    pub token: String,
+    /// The coordinator's group name — for node logging only (nodes do not
+    /// know their own group name; the token is the membership proof).
+    pub group: Option<String>,
+    /// The plan's identity (name / version / sha256).
+    pub plan: PlanIdentity,
+    /// Targeting criteria, `key=value`, AND semantics, evaluated by the
+    /// node against its own identity. Empty = every node in the group.
+    pub criteria: Vec<String>,
+    /// The canary cohort (present when `stage == Canary`).
+    pub canary: Option<Canary>,
+    /// The IP address the node dials back to.
+    pub origin: String,
+    /// The coordinator's callback TCP port.
+    pub callback_port: u16,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -919,5 +1006,77 @@ mod tests {
             vec!["api_key".to_string(), "listen_port".to_string()]
         );
         assert_eq!(back.files[0].sha256, "a".repeat(64));
+    }
+
+    fn sample_intent(canary: Option<Canary>, stage: SpreadStage) -> SpreadIntent {
+        SpreadIntent {
+            version: 1,
+            spread_id: "8f3a1c02d4e5b6a7".to_string(),
+            stage,
+            issued_at: 1_750_000_000,
+            token: "ab".repeat(32),
+            group: Some("edge".to_string()),
+            plan: PlanIdentity {
+                name: "webapp".to_string(),
+                version: "1.2.3".to_string(),
+                sha256: "cd".repeat(32),
+            },
+            criteria: vec!["role=edge".to_string(), "cap:mqtt=true".to_string()],
+            canary,
+            origin: "192.168.1.5".to_string(),
+            callback_port: 41731,
+        }
+    }
+
+    #[test]
+    fn spread_intent_round_trips() {
+        for (canary, stage) in [
+            (None, SpreadStage::Full),
+            (Some(Canary::Percentage { pct: 25 }), SpreadStage::Canary),
+            (
+                Some(Canary::Subset {
+                    criterion: "role=canary".to_string(),
+                }),
+                SpreadStage::Canary,
+            ),
+        ] {
+            let intent = sample_intent(canary, stage);
+            let json = serde_json::to_string(&intent).unwrap();
+            let back: SpreadIntent = serde_json::from_str(&json).unwrap();
+            assert_eq!(json, serde_json::to_string(&back).unwrap());
+            assert_eq!(back, intent);
+        }
+    }
+
+    #[test]
+    fn spread_intent_carries_its_type_tag() {
+        let json = serde_json::to_string(&sample_intent(None, SpreadStage::Full)).unwrap();
+        assert!(json.contains(r#""type":"SpreadIntent""#), "got: {json}");
+    }
+
+    #[test]
+    fn canary_variants_are_distinguishable_on_the_wire() {
+        let pct: Canary = serde_json::from_str(r#"{"kind":"percentage","pct":10}"#).unwrap();
+        let sub: Canary =
+            serde_json::from_str(r#"{"kind":"subset","criterion":"env=staging"}"#).unwrap();
+        assert_eq!(pct, Canary::Percentage { pct: 10 });
+        assert_eq!(
+            sub,
+            Canary::Subset {
+                criterion: "env=staging".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn spread_stage_serializes_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&SpreadStage::Canary).unwrap(),
+            r#""canary""#
+        );
+        assert_eq!(
+            serde_json::to_string(&SpreadStage::Full).unwrap(),
+            r#""full""#
+        );
     }
 }

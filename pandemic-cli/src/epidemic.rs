@@ -15,18 +15,41 @@
 //! --discover` lists the nodes advertising `_pandemic-node._tcp.local`, and
 //! `epidemic spread --discover` unions them with the group/ad-hoc roster
 //! (deduplicated by address, same as everywhere else).
+//!
+//! **Broadcast (increment 3):** `epidemic spread --broadcast` carries only a
+//! small *intent* datagram over the multicast group (default
+//! `239.255.77.11:7712`, TTL 1 — it stays on the link). No payload and no
+//! secret travel in cleartext: the intent carries a
+//! `token = HMAC-SHA256(epidemic_secret, spread_id)` (membership proof) and a
+//! `sha256` of the concrete plan. Nodes self-select on `key=value` criteria
+//! and, for canary spreads, on a stateless cohort; a selected node dials the
+//! coordinator's callback listener, signs the handshake, receives the
+//! `ApplyDeployment` (verifying its digest), and applies it through the local
+//! agent. `--canary` + `--promote --spread-id` give the staged rollout;
+//! `epidemic spreads` lists recent broadcast history.
 
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use pandemic_common::discovery::{self, DiscoveredNode};
 use pandemic_common::groups::{
     default_groups_path, find_group, load_groups_or_default, merge_roster,
 };
-use pandemic_common::{auth, GroupConfig, NodeConfig, RemoteClient};
-use pandemic_protocol::{AgentRequest, Response};
+use pandemic_common::{
+    auth, generate_spread_id, intent_token, parse_criteria, send_intent, sha256_hex, Criterion,
+    GroupConfig, NodeConfig, RemoteClient, DEFAULT_MULTICAST_GROUP, DEFAULT_MULTICAST_PORT,
+    INTENT_RESENDS, INTENT_VERSION,
+};
+use pandemic_protocol::{
+    AgentRequest, AuthChallenge, AuthResponse, Canary, PlanIdentity, Response, SpreadIntent,
+    SpreadStage,
+};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::Mutex;
 
 use crate::apply::deployment_apply_infections;
 use crate::deployment::{print_dry_run, resolve_deployment_plan};
@@ -55,6 +78,28 @@ impl Discovery {
     fn duration(self) -> Duration {
         Duration::from_secs(self.timeout_secs)
     }
+}
+
+/// Resolved `--broadcast` options (defaults already applied), shared by the
+/// spread handler and the intent builder. Bundled so the related flags travel
+/// as one unit through the call chain (the same pattern as [`Discovery`]).
+#[derive(Clone)]
+struct Broadcast {
+    /// Targeting criteria, `key=value`, AND semantics (empty = every node).
+    criteria: Vec<String>,
+    /// The canary cohort, or `None` for a plain full spread.
+    canary: Option<Canary>,
+    /// Promote an existing canary: re-broadcast the same `spread_id` at Full.
+    promote: bool,
+    /// A fixed spread id (required by `--promote`; fresh ones generated
+    /// otherwise). See `epidemic spreads` for recent ids.
+    spread_id: Option<String>,
+    /// Multicast group (default [`DEFAULT_MULTICAST_GROUP`]).
+    group: Ipv4Addr,
+    /// Multicast UDP port (default [`DEFAULT_MULTICAST_PORT`]).
+    port: u16,
+    /// How long to wait for node callbacks before reporting the result.
+    wait_secs: u64,
 }
 
 #[derive(clap::Subcommand)]
@@ -87,6 +132,43 @@ pub enum EpidemicAction {
         /// mDNS probe timeout in seconds
         #[arg(long, default_value_t = 3)]
         timeout: u64,
+
+        // ── Broadcast (increment 3): multicast intent + node self-selection ──
+        /// Spread over the multicast intent group instead of a roster. Nodes
+        /// holding the group secret self-select on the criteria and dial back.
+        #[arg(long)]
+        broadcast: bool,
+        /// Targeting criterion `KEY=VALUE` (repeatable, AND semantics).
+        /// `name=X`, a node label, or `cap:NAME=true`; empty = every node.
+        #[arg(long = "criteria", value_name = "KEY=VALUE")]
+        criteria: Vec<String>,
+        /// Canary cohort: a percentage (`25`) or a `KEY=VALUE` criterion
+        /// (`role=canary`). Only matching nodes apply at the canary stage.
+        #[arg(long)]
+        canary: Option<String>,
+        /// Promote a prior canary: re-broadcast `--spread-id` at Full so every
+        /// matching node that has not applied yet does so.
+        #[arg(long)]
+        promote: bool,
+        /// A fixed spread id (required for `--promote`; generated otherwise).
+        /// See `epidemic spreads` for recent ids.
+        #[arg(long = "spread-id")]
+        spread_id: Option<String>,
+        /// Multicast group to broadcast on (site-local; default 239.255.77.11)
+        #[arg(long)]
+        multicast_group: Option<Ipv4Addr>,
+        /// UDP port to broadcast on (default 7712)
+        #[arg(long)]
+        multicast_port: Option<u16>,
+        /// Seconds to wait for node callbacks before reporting the result
+        #[arg(long, default_value_t = 15)]
+        wait: u64,
+    },
+    /// List recent broadcast spreads (newest first)
+    Spreads {
+        /// How many recent spreads to show
+        #[arg(long, default_value_t = 20)]
+        limit: u32,
     },
     /// List configured groups and their node rosters
     Nodes {
@@ -121,6 +203,14 @@ pub async fn handle_epidemic_command(
             discover,
             interface,
             timeout,
+            broadcast,
+            criteria,
+            canary,
+            promote,
+            spread_id,
+            multicast_group,
+            multicast_port,
+            wait,
         } => {
             let secret = EpidemicSecret {
                 inline: epidemic_secret,
@@ -140,9 +230,18 @@ pub async fn handle_epidemic_command(
                 dry_run,
                 secret,
                 probe,
+                broadcast,
+                criteria,
+                canary.as_deref().map(parse_canary_arg).transpose()?,
+                promote,
+                spread_id,
+                multicast_group.unwrap_or(DEFAULT_MULTICAST_GROUP),
+                multicast_port.unwrap_or(DEFAULT_MULTICAST_PORT),
+                wait,
             )
             .await
         }
+        EpidemicAction::Spreads { limit } => spreads(limit).await,
         EpidemicAction::Nodes {
             group,
             discover,
@@ -161,7 +260,8 @@ pub async fn handle_epidemic_command(
 
 #[allow(clippy::too_many_arguments)]
 // Top-level `epidemic spread` handler: it carries the full CLI flag set
-// (target, roster sources, plan inputs, dry-run, secret, and the mDNS probe).
+// (target, roster sources, plan inputs, dry-run, secret, the mDNS probe, and
+// the broadcast options). `--broadcast` routes to the multicast path.
 async fn spread(
     target: &str,
     group: Option<&str>,
@@ -171,7 +271,50 @@ async fn spread(
     dry_run: bool,
     epidemic_secret: EpidemicSecret,
     probe: Discovery,
+    broadcast: bool,
+    criteria: Vec<String>,
+    canary: Option<Canary>,
+    promote: bool,
+    spread_id: Option<String>,
+    mcast_group: Ipv4Addr,
+    mcast_port: u16,
+    wait_secs: u64,
 ) -> Result<()> {
+    // Broadcast flag validation (cheap, up front — before any network I/O).
+    validate_broadcast_flags(
+        broadcast,
+        group,
+        adhoc,
+        probe.enabled,
+        &criteria,
+        canary.as_ref(),
+        promote,
+        spread_id.as_deref(),
+    )?;
+
+    // The `--broadcast` path: multicast intent + node self-selection. The
+    // roster/discovery flags are excluded by validation above.
+    if broadcast {
+        return run_broadcast(
+            target,
+            set_args,
+            registry_url,
+            dry_run,
+            epidemic_secret,
+            probe.interface,
+            &Broadcast {
+                criteria,
+                canary,
+                promote,
+                spread_id,
+                group: mcast_group,
+                port: mcast_port,
+                wait_secs,
+            },
+        )
+        .await;
+    }
+
     // 1. Resolve the target roster: the named group's nodes merged with any
     //    ad-hoc `--node` endpoints (de-duplicated by addr, group first).
     let (mut roster, group_secret_path) = resolve_roster(group, adhoc)?;
@@ -373,6 +516,585 @@ fn resolve_epidemic_secret(
     Ok(secret)
 }
 
+// ── Broadcast (increment 3) ────────────────────────────────────────────────
+
+/// Validate the broadcast flag combinations up front (before any network I/O):
+/// `--broadcast` is the roster-free path (no `--node`/`--group`/`--discover`),
+/// and the canary/promote/spread-id/criteria options are broadcast-only.
+#[allow(clippy::too_many_arguments)]
+fn validate_broadcast_flags(
+    broadcast: bool,
+    group: Option<&str>,
+    adhoc: &[String],
+    discover: bool,
+    criteria: &[String],
+    canary: Option<&Canary>,
+    promote: bool,
+    spread_id: Option<&str>,
+) -> Result<()> {
+    if broadcast {
+        if group.is_some() || !adhoc.is_empty() || discover {
+            bail!(
+                "--broadcast spreads over the multicast group and takes no roster — drop --node/--group/--discover"
+            );
+        }
+        if promote && canary.is_some() {
+            bail!("--promote and --canary are mutually exclusive (promote re-broadcasts an existing spread at Full)");
+        }
+        if promote && spread_id.is_none() {
+            bail!("--promote requires --spread-id (see `epidemic spreads` for recent ids)");
+        }
+        // The criteria must be parseable (the node re-parses them, but we fail
+        // early with a clear message instead of broadcasting garbage).
+        parse_criteria(criteria)?;
+        return Ok(());
+    }
+    // Not broadcast: the broadcast-only flags must be absent.
+    if canary.is_some() {
+        bail!("--canary requires --broadcast");
+    }
+    if promote {
+        bail!("--promote requires --broadcast");
+    }
+    if spread_id.is_some() {
+        bail!("--spread-id is a --broadcast flag");
+    }
+    if !criteria.is_empty() {
+        bail!("--criteria is a --broadcast flag (a roster spread targets its nodes explicitly)");
+    }
+    Ok(())
+}
+
+/// Parse a `--canary` argument: a percentage (`25` or `25%`) →
+/// [`Canary::Percentage`]; a `KEY=VALUE` criterion (`role=canary`) →
+/// [`Canary::Subset`]. Anything else is an error.
+fn parse_canary_arg(raw: &str) -> Result<Canary> {
+    let s = raw.trim();
+    if s.is_empty() {
+        bail!("--canary expects a percentage (e.g. 25) or a criterion (e.g. role=canary)");
+    }
+    let pct_str = s.strip_suffix('%').unwrap_or(s);
+    if let Ok(pct) = pct_str.parse::<u8>() {
+        return Ok(Canary::Percentage { pct });
+    }
+    if s.contains('=') {
+        Criterion::parse(s)?; // validate the key=value form
+        return Ok(Canary::Subset {
+            criterion: s.to_string(),
+        });
+    }
+    bail!(
+        "--canary expects a percentage (e.g. 25) or a key=value criterion (e.g. role=canary), got '{raw}'"
+    )
+}
+
+/// The unix-seconds timestamp for an intent's `issued_at`.
+fn now_unix_secs() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Build a spread intent from the concrete plan's identity. `plan_sha` is the
+/// sha256 of the exact `ApplyDeployment` request line the callback will send
+/// (the node trims the trailing newline before hashing, so it matches).
+#[allow(clippy::too_many_arguments)]
+fn build_intent(
+    secret: &str,
+    spread_id: &str,
+    stage: SpreadStage,
+    name: &str,
+    version: &str,
+    plan_sha: &str,
+    criteria: Vec<String>,
+    canary: Option<Canary>,
+    origin: String,
+    callback_port: u16,
+    issued_at: i64,
+) -> SpreadIntent {
+    SpreadIntent {
+        version: INTENT_VERSION,
+        spread_id: spread_id.to_string(),
+        stage,
+        issued_at,
+        token: intent_token(secret, spread_id),
+        group: None,
+        plan: PlanIdentity {
+            name: name.to_string(),
+            version: version.to_string(),
+            sha256: plan_sha.to_string(),
+        },
+        criteria,
+        canary,
+        origin,
+        callback_port,
+    }
+}
+
+/// The local IPv4 the kernel would route to a public destination — i.e. the
+/// primary LAN address (used as the intent's `origin` when `--interface` is
+/// not given). A UDP `connect` sends no packets.
+fn primary_lan_ip() -> Option<Ipv4Addr> {
+    let sock = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    sock.connect("8.8.8.8:80").ok()?;
+    match sock.local_addr().ok()?.ip() {
+        std::net::IpAddr::V4(v4) => Some(v4),
+        std::net::IpAddr::V6(_) => None,
+    }
+}
+
+/// The broadcast path: resolve the plan, sign an intent, run a callback
+/// listener, broadcast the intent (with re-sends), and wait for the nodes that
+/// self-select to dial back, apply, and report. Roles are flipped vs the TCP
+/// path — the node is the one that dials and sends the `Response`.
+async fn run_broadcast(
+    target: &str,
+    set_args: &[String],
+    registry_url: Option<String>,
+    dry_run: bool,
+    epidemic_secret: EpidemicSecret,
+    interface: Option<Ipv4Addr>,
+    bcast: &Broadcast,
+) -> Result<()> {
+    // 1. Pure Plan step (shared with the roster path) — one concrete plan.
+    let dp = resolve_deployment_plan(target, set_args, registry_url).await?;
+    let name = dp.spec.meta.name.clone();
+    let version = dp.spec.meta.version.clone();
+
+    let request = AgentRequest::ApplyDeployment {
+        name: name.clone(),
+        version: version.clone(),
+        variables: dp.shared.clone(),
+        infections: deployment_apply_infections(&dp),
+    };
+    // Serialize once; the callback sends exactly this line and the intent's
+    // `plan.sha256` is the digest of it (no terminator). Re-serializing would
+    // be safe here (BTreeMap/Vec keep it deterministic) but we avoid it.
+    let request_line = serde_json::to_string(&request)?;
+    let plan_sha = sha256_hex(&request_line);
+
+    let secret = resolve_epidemic_secret(&epidemic_secret, None)?;
+
+    let spread_id = bcast.spread_id.clone().unwrap_or_else(generate_spread_id);
+    let stage = if bcast.promote {
+        SpreadStage::Full
+    } else if bcast.canary.is_some() {
+        SpreadStage::Canary
+    } else {
+        SpreadStage::Full
+    };
+
+    let origin = interface.or_else(primary_lan_ip).ok_or_else(|| {
+        anyhow!("no LAN IPv4 to advertise as the callback origin — pass --interface")
+    })?;
+
+    if dry_run {
+        println!(
+            "DRY RUN — broadcast deployment '{}' v{} over {}:{} (nothing will be applied)",
+            name, version, bcast.group, bcast.port
+        );
+        println!("  stage:       {:?}", stage);
+        println!("  spread_id:   {spread_id}");
+        println!("  origin:      {origin}");
+        if bcast.criteria.is_empty() {
+            println!("  criteria:    (all matching nodes)");
+        } else {
+            println!("  criteria:    {}", bcast.criteria.join(", "));
+        }
+        match &bcast.canary {
+            Some(Canary::Percentage { pct }) => println!("  canary:      {pct}% cohort"),
+            Some(Canary::Subset { criterion }) => println!("  canary:      subset {criterion}"),
+            None => println!("  canary:      (none)"),
+        }
+        println!("  plan sha256: {plan_sha}");
+        print_dry_run(&dp);
+        return Ok(());
+    }
+
+    // 2. Callback listener on an ephemeral port (the node dials this).
+    let listener = TcpListener::bind("0.0.0.0:0").await?;
+    let callback_port = listener.local_addr()?.port();
+
+    let intent = build_intent(
+        &secret,
+        &spread_id,
+        stage,
+        &name,
+        &version,
+        &plan_sha,
+        bcast.criteria.clone(),
+        bcast.canary.clone(),
+        origin.to_string(),
+        callback_port,
+        now_unix_secs(),
+    );
+
+    // 3. Spawn the accept loop; each selected node becomes one connection.
+    let results: Arc<Mutex<Vec<(SocketAddr, Response)>>> = Arc::new(Mutex::new(Vec::new()));
+    {
+        let results = results.clone();
+        let secret = secret.clone();
+        let request_line = request_line.clone();
+        tokio::spawn(async move {
+            loop {
+                let (stream, peer) = match listener.accept().await {
+                    Ok(x) => x,
+                    Err(_) => break,
+                };
+                let results = results.clone();
+                let secret = secret.clone();
+                let request_line = request_line.clone();
+                tokio::spawn(async move {
+                    let response = serve_one_callback(stream, &secret, &request_line).await;
+                    results.lock().await.push((peer, response));
+                });
+            }
+        });
+    }
+
+    // 4. Broadcast the intent. UDP is best-effort, so re-send a few times;
+    //    nodes de-duplicate by spread_id, so repeats are harmless.
+    for _ in 0..INTENT_RESENDS {
+        send_intent(bcast.group, bcast.port, interface, &intent)?;
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+
+    // 5. Wait for callbacks: stop after a short quiescence once at least one
+    //    node has answered, or at the `--wait` deadline (whichever first).
+    let deadline = std::time::Instant::now() + Duration::from_secs(bcast.wait_secs);
+    let mut last_count = 0usize;
+    let mut last_change: Option<std::time::Instant> = None;
+    loop {
+        let count = results.lock().await.len();
+        if count != last_count {
+            last_count = count;
+            last_change = Some(std::time::Instant::now());
+        }
+        let settled = last_change
+            .map(|t| t.elapsed() >= Duration::from_secs(2))
+            .unwrap_or(false);
+        if settled || std::time::Instant::now() >= deadline {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // 6. Report per-node results and record history.
+    let collected = std::mem::take(&mut *results.lock().await);
+    report_and_record(&name, stage, &spread_id, &intent, &collected, bcast).await
+}
+
+/// One callback connection: the coordinator is the server here. Handshake with
+/// the epidemic secret, send the exact plan line (the intent's digest is over
+/// it, no terminator), and read the node's `Response`.
+async fn serve_one_callback(stream: TcpStream, secret: &str, request_line: &str) -> Response {
+    let (reader, mut writer) = tokio::io::split(stream);
+    let mut br = BufReader::new(reader);
+    let mut line = String::new();
+
+    // Handshake: challenge, then verify the node's signature.
+    let challenge = AuthChallenge {
+        nonce: auth::generate_nonce(),
+    };
+    let mut payload = match serde_json::to_string(&challenge) {
+        Ok(p) => p,
+        Err(e) => return Response::error(format!("callback: encoding challenge: {e}")),
+    };
+    payload.push('\n');
+    if writer.write_all(payload.as_bytes()).await.is_err() || writer.flush().await.is_err() {
+        return Response::error("callback: sending challenge failed");
+    }
+
+    if br.read_line(&mut line).await.is_err() {
+        return Response::error("callback: reading AuthResponse failed");
+    }
+    let auth_response: AuthResponse = match serde_json::from_str(line.trim()) {
+        Ok(r) => r,
+        Err(e) => return Response::error(format!("callback: bad AuthResponse: {e}")),
+    };
+    if !auth::verify(secret, &auth_response.nonce, &auth_response.signature) {
+        return Response::error("callback handshake: bad signature");
+    }
+
+    // Send the plan (the exact line the intent's sha256 is over, + terminator).
+    let mut payload = request_line.to_string();
+    payload.push('\n');
+    if writer.write_all(payload.as_bytes()).await.is_err() || writer.flush().await.is_err() {
+        return Response::error("callback: sending the plan failed");
+    }
+
+    line.clear();
+    if br.read_line(&mut line).await.is_err() {
+        return Response::error("callback: reading the node response failed");
+    }
+    match serde_json::from_str(line.trim()) {
+        Ok(r) => r,
+        Err(e) => Response::error(format!("callback: bad response line: {e}")),
+    }
+}
+
+/// Evaluate the collected callbacks for this stage, print the per-node results,
+/// record the spread in history, and return `Err` when the spread did not
+/// land (a failed or no-op spread must not look like success). A promote that
+/// reaches no new node is a benign no-op (they already applied that id).
+async fn report_and_record(
+    name: &str,
+    stage: SpreadStage,
+    spread_id: &str,
+    intent: &SpreadIntent,
+    callbacks: &[(SocketAddr, Response)],
+    bcast: &Broadcast,
+) -> Result<()> {
+    let mut applied = 0u32;
+    let mut failed = 0u32;
+    for (peer, response) in callbacks {
+        match response {
+            Response::Success { .. } => {
+                println!("  ✓  {peer}  applied");
+                applied += 1;
+            }
+            Response::Error { message } => {
+                println!("  ✗  {peer}  FAILED: {message}");
+                failed += 1;
+            }
+            Response::NotFound { message } => {
+                println!("  ✗  {peer}  FAILED: {message}");
+                failed += 1;
+            }
+        }
+    }
+    let stage_str = match stage {
+        SpreadStage::Canary => "canary",
+        SpreadStage::Full if bcast.promote => "promote",
+        SpreadStage::Full => "full",
+    };
+
+    let ok = failed == 0
+        && if applied == 0 {
+            // A no-op is only fine when it is a promote (idempotent) or a
+            // canary the operator may retry — otherwise nothing landed.
+            bcast.promote
+        } else {
+            true
+        };
+
+    record_spread(&SpreadRecord {
+        timestamp: intent.issued_at,
+        spread_id: spread_id.to_string(),
+        stage: stage_str.to_string(),
+        name: name.to_string(),
+        version: intent.plan.version.clone(),
+        sha256: intent.plan.sha256.clone(),
+        origin: intent.origin.clone(),
+        criteria: intent.criteria.join(";"),
+        canary: describe_canary(bcast.canary.as_ref()),
+        callbacks: callbacks.len() as u32,
+        applied,
+        failed,
+        ok,
+    })?;
+
+    if !ok {
+        if applied == 0 {
+            return Err(anyhow::anyhow!(
+                "no node applied the {stage_str} spread ({} callback(s)) — check the epidemic secret, the group/interface, and that nodes joined the group",
+                callbacks.len()
+            ));
+        }
+        return Err(anyhow::anyhow!(
+            "'{name}' {stage_str} spread: {applied} applied but {failed} callback(s) failed"
+        ));
+    }
+
+    if applied == 0 {
+        println!("\n✅ promote of {spread_id}: no new node applied (likely already applied)");
+    } else {
+        println!(
+            "\n✅ broadcast '{name}' as {stage_str} — {applied} applied, {failed} failed (spread_id={spread_id})"
+        );
+    }
+    Ok(())
+}
+
+/// A human-readable form of the canary cohort for the history log.
+fn describe_canary(canary: Option<&Canary>) -> String {
+    match canary {
+        Some(Canary::Percentage { pct }) => format!("pct={pct}"),
+        Some(Canary::Subset { criterion }) => format!("subset={criterion}"),
+        None => String::new(),
+    }
+}
+
+// ── Broadcast history (`epidemic spreads`) ─────────────────────────────────
+
+/// One recorded broadcast, one TSV line. Fields are tab/newline-free.
+#[derive(Debug, Clone)]
+struct SpreadRecord {
+    timestamp: i64,
+    spread_id: String,
+    stage: String,
+    name: String,
+    version: String,
+    sha256: String,
+    origin: String,
+    criteria: String,
+    canary: String,
+    callbacks: u32,
+    applied: u32,
+    failed: u32,
+    ok: bool,
+}
+
+/// Where broadcast history is stored: `$XDG_STATE_HOME/pandemic/…`, falling
+/// back to `~/.local/state/pandemic/…`, then `/etc/pandemic/`.
+fn spread_history_path() -> Result<PathBuf> {
+    if let Some(state) = std::env::var_os("XDG_STATE_HOME") {
+        return Ok(PathBuf::from(state).join("pandemic/spread-history.log"));
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        return Ok(PathBuf::from(home).join(".local/state/pandemic/spread-history.log"));
+    }
+    Ok(PathBuf::from("/etc/pandemic/spread-history.log"))
+}
+
+/// Strip characters that would corrupt a TSV field.
+fn sanitize(field: &str) -> String {
+    field.replace(['\t', '\n', '\r'], " ")
+}
+
+/// Append one record to the default history file.
+fn record_spread(record: &SpreadRecord) -> Result<()> {
+    append_record(&spread_history_path()?, record)
+}
+
+/// Append one record as a TSV line, creating the file (and parent dir).
+fn append_record(path: &std::path::Path, record: &SpreadRecord) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    let line = [
+        record.timestamp.to_string(),
+        sanitize(&record.spread_id),
+        sanitize(&record.stage),
+        sanitize(&record.name),
+        sanitize(&record.version),
+        sanitize(&record.sha256),
+        sanitize(&record.origin),
+        sanitize(&record.criteria),
+        sanitize(&record.canary),
+        record.callbacks.to_string(),
+        record.applied.to_string(),
+        record.failed.to_string(),
+        record.ok.to_string(),
+    ]
+    .join("\t");
+    use std::io::Write;
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .with_context(|| format!("opening {}", path.display()))?;
+    writeln!(f, "{line}")?;
+    Ok(())
+}
+
+/// Read the most recent `limit` records (newest first) from the history file.
+fn load_spreads(path: &std::path::Path, limit: usize) -> Vec<SpreadRecord> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    text.lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|line| {
+            let f: Vec<&str> = line.split('\t').collect();
+            if f.len() < 13 {
+                return None;
+            }
+            Some(SpreadRecord {
+                timestamp: f[0].parse().unwrap_or(0),
+                spread_id: f[1].to_string(),
+                stage: f[2].to_string(),
+                name: f[3].to_string(),
+                version: f[4].to_string(),
+                sha256: f[5].to_string(),
+                origin: f[6].to_string(),
+                criteria: f[7].to_string(),
+                canary: f[8].to_string(),
+                callbacks: f[9].parse().unwrap_or(0),
+                applied: f[10].parse().unwrap_or(0),
+                failed: f[11].parse().unwrap_or(0),
+                ok: f[12] == "true",
+            })
+        })
+        .rev()
+        .take(limit)
+        .collect()
+}
+
+/// `epidemic spreads`: print recent broadcast history (newest first).
+async fn spreads(limit: u32) -> Result<()> {
+    let path = spread_history_path()?;
+    let records = load_spreads(&path, limit as usize);
+    if records.is_empty() {
+        println!("No broadcast spreads recorded yet at {}.", path.display());
+        println!("  Run `epidemic spread <target> --broadcast` to create one.");
+        return Ok(());
+    }
+    println!(
+        "Recent broadcast spreads ({} shown, newest first):\n",
+        records.len()
+    );
+    for r in &records {
+        let when = r.timestamp;
+        println!(
+            "  {}  {}  {} v{}  applied={}/{}  ok={}",
+            human_timestamp(when),
+            if r.ok { "✓" } else { "✗" },
+            r.name,
+            r.version,
+            r.applied,
+            r.callbacks,
+            r.ok
+        );
+        println!("      spread_id={}", r.spread_id);
+        println!("      stage={}  origin={}", r.stage, r.origin);
+        if !r.criteria.is_empty() {
+            println!("      criteria={}", r.criteria);
+        }
+        if !r.canary.is_empty() {
+            println!("      canary={}", r.canary);
+        }
+        println!();
+    }
+    Ok(())
+}
+
+/// Render a unix-seconds timestamp as `YYYY-MM-DD HH:MM:SS` (UTC), without a
+/// chrono dependency (the CLI does not link chrono).
+fn human_timestamp(secs: i64) -> String {
+    if secs <= 0 {
+        return "-".to_string();
+    }
+    // Days since the Unix epoch → calendar date (Hinnant civil-from-days).
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400) as u32;
+    let (hh, mm, ss) = (rem / 3600, (rem % 3600) / 60, rem % 60);
+    // Shift from the 1970 epoch to the proleptic Gregorian year-0 epoch.
+    let z = days + 719_468;
+    let era = z.div_euclid(146097).max(0);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let yy = if m <= 2 { y + 1 } else { y };
+    format!("{yy:04}-{m:02}-{d:02} {hh:02}:{mm:02}:{ss:02}Z")
+}
+
 async fn nodes(group: Option<&str>, probe: Discovery) -> Result<()> {
     // `--discover`: probe the LAN over mDNS. Discovery is the point of this
     // flag, so a probe failure is a hard error (not a warning as in `spread`).
@@ -541,5 +1263,242 @@ addr = "10.0.0.1:7711"
         std::fs::write(&path, "").unwrap();
         let groups = load_groups_or_default(Some(path.as_path())).unwrap();
         assert!(find_group(&groups, "nope").is_none());
+    }
+
+    // ── Broadcast (increment 3) ──────────────────────────────────────────
+
+    #[test]
+    fn parse_canary_arg_percentage_and_subset() {
+        assert_eq!(
+            parse_canary_arg("25").unwrap(),
+            Canary::Percentage { pct: 25 }
+        );
+        assert_eq!(
+            parse_canary_arg("25%").unwrap(),
+            Canary::Percentage { pct: 25 }
+        );
+        assert_eq!(
+            parse_canary_arg(" 25 ").unwrap(),
+            Canary::Percentage { pct: 25 }
+        );
+        assert_eq!(
+            parse_canary_arg("role=canary").unwrap(),
+            Canary::Subset {
+                criterion: "role=canary".to_string()
+            }
+        );
+        // A capability criterion is also a valid named subset.
+        matches!(
+            parse_canary_arg("cap:mqtt=true").unwrap(),
+            Canary::Subset { .. }
+        );
+        // Errors.
+        assert!(parse_canary_arg("").is_err());
+        assert!(parse_canary_arg("256").is_err(), "255 is the u8 ceiling");
+        assert!(parse_canary_arg("nonsense").is_err());
+        assert!(parse_canary_arg("noequals").is_err());
+    }
+
+    #[test]
+    fn validate_broadcast_flags_combos() {
+        // A plain broadcast (no roster, no canary/promote) is fine.
+        assert!(validate_broadcast_flags(true, None, &[], false, &[], None, false, None).is_ok());
+        // Broadcast takes no roster.
+        assert!(
+            validate_broadcast_flags(true, Some("edge"), &[], false, &[], None, false, None)
+                .is_err()
+        );
+        assert!(validate_broadcast_flags(
+            true,
+            None,
+            &["1.1.1.1:7711".to_string()],
+            false,
+            &[],
+            None,
+            false,
+            None
+        )
+        .is_err());
+        assert!(validate_broadcast_flags(true, None, &[], true, &[], None, false, None).is_err());
+        // --promote and --canary are mutually exclusive; --promote needs an id.
+        assert!(validate_broadcast_flags(
+            true,
+            None,
+            &[],
+            false,
+            &[],
+            Some(&Canary::Percentage { pct: 10 }),
+            true,
+            Some("id")
+        )
+        .is_err());
+        assert!(validate_broadcast_flags(true, None, &[], false, &[], None, true, None).is_err());
+        // A bad criterion is rejected even in broadcast mode.
+        assert!(validate_broadcast_flags(
+            true,
+            None,
+            &[],
+            false,
+            &["noequals".to_string()],
+            None,
+            false,
+            None
+        )
+        .is_err());
+        // Non-broadcast spreads reject the broadcast-only flags.
+        assert!(validate_broadcast_flags(
+            false,
+            None,
+            &[],
+            false,
+            &[],
+            Some(&Canary::Percentage { pct: 10 }),
+            false,
+            None
+        )
+        .is_err());
+        assert!(validate_broadcast_flags(false, None, &[], false, &[], None, true, None).is_err());
+        assert!(
+            validate_broadcast_flags(false, None, &[], false, &[], None, false, Some("id"))
+                .is_err()
+        );
+        assert!(validate_broadcast_flags(
+            false,
+            None,
+            &[],
+            false,
+            &["role=edge".to_string()],
+            None,
+            false,
+            None
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn build_intent_sets_token_stage_and_sha() {
+        let secret = "epi-secret";
+        let spread_id = "8f3a1c02d4e5b6a7";
+        let sha = "cd".repeat(32);
+        let intent = build_intent(
+            secret,
+            spread_id,
+            SpreadStage::Canary,
+            "webapp",
+            "1.2.3",
+            &sha,
+            vec!["role=edge".to_string()],
+            Some(Canary::Percentage { pct: 25 }),
+            "192.168.1.5".to_string(),
+            41731,
+            1_750_000_000,
+        );
+        assert_eq!(intent.version, INTENT_VERSION);
+        assert_eq!(intent.spread_id, spread_id);
+        assert_eq!(intent.stage, SpreadStage::Canary);
+        assert_eq!(intent.token, intent_token(secret, spread_id));
+        // The token is the membership proof: it verifies against the shared
+        // secret and against nothing else.
+        assert!(pandemic_common::verify_intent_token(secret, &intent));
+        assert!(!pandemic_common::verify_intent_token(
+            "other-secret",
+            &intent
+        ));
+        assert_eq!(intent.plan.name, "webapp");
+        assert_eq!(intent.plan.version, "1.2.3");
+        assert_eq!(intent.plan.sha256, sha);
+        assert_eq!(intent.criteria, vec!["role=edge".to_string()]);
+        assert_eq!(intent.canary, Some(Canary::Percentage { pct: 25 }));
+        assert_eq!(intent.origin, "192.168.1.5");
+        assert_eq!(intent.callback_port, 41731);
+        assert_eq!(intent.issued_at, 1_750_000_000);
+        assert!(intent.group.is_none());
+    }
+
+    fn sample_record(ts: i64, sid: &str, ok: bool) -> SpreadRecord {
+        SpreadRecord {
+            timestamp: ts,
+            spread_id: sid.to_string(),
+            stage: if ok {
+                "full".to_string()
+            } else {
+                "canary".to_string()
+            },
+            name: "webapp".to_string(),
+            version: "1.2.3".to_string(),
+            sha256: "cd".repeat(32),
+            origin: "192.168.1.5".to_string(),
+            criteria: "role=edge;env=prod".to_string(),
+            canary: "pct=25".to_string(),
+            callbacks: 3,
+            applied: 2,
+            failed: 1,
+            ok,
+        }
+    }
+
+    #[test]
+    fn spread_history_round_trips_newest_first() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("sub").join("history.log");
+
+        append_record(&path, &sample_record(1000, "aaaa", true)).unwrap();
+        append_record(&path, &sample_record(2000, "bbbb", false)).unwrap();
+        append_record(&path, &sample_record(3000, "cccc", true)).unwrap();
+
+        let all = load_spreads(&path, 10);
+        assert_eq!(all.len(), 3);
+        // Newest first: the reverse of append order.
+        assert_eq!(all[0].spread_id, "cccc");
+        assert_eq!(all[1].spread_id, "bbbb");
+        assert_eq!(all[2].spread_id, "aaaa");
+
+        // Fields survive the round-trip.
+        assert_eq!(all[0].timestamp, 3000);
+        assert_eq!(all[0].name, "webapp");
+        assert_eq!(all[0].version, "1.2.3");
+        assert_eq!(all[0].criteria, "role=edge;env=prod");
+        assert_eq!(all[0].canary, "pct=25");
+        assert_eq!(all[0].callbacks, 3);
+        assert_eq!(all[0].applied, 2);
+        assert_eq!(all[0].failed, 1);
+        assert!(all[0].ok);
+        assert!(!all[1].ok);
+
+        // Limit caps the count, newest first.
+        let one = load_spreads(&path, 1);
+        assert_eq!(one.len(), 1);
+        assert_eq!(one[0].spread_id, "cccc");
+
+        // A missing file yields an empty history, not an error.
+        assert!(load_spreads(&dir.path().join("nope.log"), 10).is_empty());
+    }
+
+    #[test]
+    fn sanitize_strips_tsv_breakers() {
+        assert_eq!(sanitize("a\tb\nc\rd"), "a b c d");
+    }
+
+    #[test]
+    fn human_timestamp_formats_utc() {
+        assert_eq!(human_timestamp(1_704_067_200), "2024-01-01 00:00:00Z");
+        // Non-positive is a placeholder, not a date.
+        assert_eq!(human_timestamp(0), "-");
+        assert_eq!(human_timestamp(-5), "-");
+    }
+
+    #[test]
+    fn describe_canary_formats() {
+        assert_eq!(describe_canary(None), "");
+        assert_eq!(
+            describe_canary(Some(&Canary::Percentage { pct: 25 })),
+            "pct=25"
+        );
+        assert_eq!(
+            describe_canary(Some(&Canary::Subset {
+                criterion: "role=canary".to_string()
+            })),
+            "subset=role=canary"
+        );
     }
 }
