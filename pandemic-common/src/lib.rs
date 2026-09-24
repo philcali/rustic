@@ -11,6 +11,7 @@ pub mod registry;
 pub mod remote;
 pub mod resolve;
 mod tests;
+pub mod tls;
 pub mod wire;
 
 // Re-export public APIs for easy access
@@ -40,3 +41,4 @@ pub use registry::{
 };
 pub use remote::RemoteClient;
 pub use resolve::{resolve_deployment_target, resolve_infection_target};
+pub use tls::{TlsClient, TlsServer};

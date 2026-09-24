@@ -40,8 +40,8 @@ use pandemic_common::groups::{
 };
 use pandemic_common::{
     auth, generate_spread_id, intent_token, parse_criteria, send_intent, sha256_hex, Criterion,
-    GroupConfig, NodeConfig, RemoteClient, DEFAULT_MULTICAST_GROUP, DEFAULT_MULTICAST_PORT,
-    INTENT_RESENDS, INTENT_VERSION,
+    GroupConfig, NodeConfig, RemoteClient, TlsClient, DEFAULT_MULTICAST_GROUP,
+    DEFAULT_MULTICAST_PORT, INTENT_RESENDS, INTENT_VERSION,
 };
 use pandemic_protocol::{
     AgentRequest, AuthChallenge, AuthResponse, Canary, PlanIdentity, Response, SpreadIntent,
@@ -103,6 +103,9 @@ struct Broadcast {
 }
 
 #[derive(clap::Subcommand)]
+// clap CLI enums are large by nature (every option per subcommand), and the
+// large fields can't be boxed — clap's derive needs the concrete types.
+#[allow(clippy::large_enum_variant)]
 pub enum EpidemicAction {
     /// Spread a deployment to a group of nodes (or an ad-hoc node list)
     Spread {
@@ -163,6 +166,18 @@ pub enum EpidemicAction {
         /// Seconds to wait for node callbacks before reporting the result
         #[arg(long, default_value_t = 15)]
         wait: u64,
+
+        // ── TLS (increment 4): encrypt the coordinator -> node hop ──────────
+        /// Encrypt the coordinator -> node hop with TLS (requires `--tls-ca`).
+        #[arg(long)]
+        tls: bool,
+        /// Root CA (PEM) used to verify each node's TLS certificate.
+        #[arg(long)]
+        tls_ca: Option<PathBuf>,
+        /// Server name each node's TLS cert must present. Default: the node's
+        /// host (the `host` of its `host:port` address).
+        #[arg(long)]
+        tls_server_name: Option<String>,
     },
     /// List recent broadcast spreads (newest first)
     Spreads {
@@ -211,6 +226,9 @@ pub async fn handle_epidemic_command(
             multicast_group,
             multicast_port,
             wait,
+            tls,
+            tls_ca,
+            tls_server_name,
         } => {
             let secret = EpidemicSecret {
                 inline: epidemic_secret,
@@ -238,6 +256,9 @@ pub async fn handle_epidemic_command(
                 multicast_group.unwrap_or(DEFAULT_MULTICAST_GROUP),
                 multicast_port.unwrap_or(DEFAULT_MULTICAST_PORT),
                 wait,
+                tls,
+                tls_ca,
+                tls_server_name,
             )
             .await
         }
@@ -279,6 +300,9 @@ async fn spread(
     mcast_group: Ipv4Addr,
     mcast_port: u16,
     wait_secs: u64,
+    tls: bool,
+    tls_ca: Option<PathBuf>,
+    tls_server_name: Option<String>,
 ) -> Result<()> {
     // Broadcast flag validation (cheap, up front — before any network I/O).
     validate_broadcast_flags(
@@ -368,6 +392,18 @@ async fn spread(
     // 3. Resolve the epidemic (network) secret for the coordinator -> node hop.
     let secret = resolve_epidemic_secret(&epidemic_secret, group_secret_path.as_deref())?;
 
+    // 3b. TLS (increment 4): build the shared trust config once (if --tls). The
+    //     server name is attached per node below (default: the node's host),
+    //     since a roster may mix endpoints.
+    let tls_trust = if tls {
+        let ca = tls_ca
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("--tls requires --tls-ca"))?;
+        Some(TlsClient::trust_from_paths(ca)?)
+    } else {
+        None
+    };
+
     // 4. Apply the identical plan to every node, collecting per-node results.
     let base_request = AgentRequest::ApplyDeployment {
         name: dp.spec.meta.name.clone(),
@@ -379,7 +415,15 @@ async fn spread(
     let name = dp.spec.meta.name.clone();
     let mut results: Vec<(NodeConfig, Result<()>)> = Vec::new();
     for node in &roster {
-        let outcome = apply_to_node(&node.addr, &secret, &base_request).await;
+        let node_tls = if let Some(trust) = tls_trust.as_ref() {
+            let server_name = tls_server_name
+                .clone()
+                .unwrap_or_else(|| host_of(&node.addr));
+            Some(TlsClient::with_server_name(trust.clone(), server_name)?)
+        } else {
+            None
+        };
+        let outcome = apply_to_node(&node.addr, &secret, &base_request, node_tls.as_ref()).await;
         results.push((node.clone(), outcome));
     }
 
@@ -424,10 +468,27 @@ fn merge_discovered(roster: &mut Vec<NodeConfig>, discovered: &[DiscoveredNode])
     added
 }
 
+/// The host portion of a `host:port` node address (used as the default TLS
+/// server name). Roster endpoints are IPv4 / hostname, so the first `:`
+/// separates host from port.
+fn host_of(addr: &str) -> String {
+    addr.split(':').next().unwrap_or(addr).to_string()
+}
+
 /// Ping a node, then apply the deployment. A failed ping is reported as
-/// "unreachable"; an apply error is reported with the node's own message.
-async fn apply_to_node(addr: &str, secret: &str, request: &AgentRequest) -> Result<()> {
-    let client = RemoteClient::new(addr, secret);
+/// "unreachable"; an apply error is reported with the node's own message. When
+/// `tls` is set (increment 4), the connection is wrapped in TLS with the
+/// shared trust config before the shared handshake.
+async fn apply_to_node(
+    addr: &str,
+    secret: &str,
+    request: &AgentRequest,
+    tls: Option<&TlsClient>,
+) -> Result<()> {
+    let client = match tls {
+        Some(tls) => RemoteClient::new(addr, secret).with_tls(tls.clone()),
+        None => RemoteClient::new(addr, secret),
+    };
     client
         .ping()
         .await

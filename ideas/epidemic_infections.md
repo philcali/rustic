@@ -54,7 +54,7 @@ Epidemic infections enable configuration and updates to "spread" across pandemic
 | 1 | Node / group / coordinator + reliable TCP spread | Foundation | **done** (v0.5.0) |
 | 2 | Discovery (mDNS/Bonjour) — roster discovery | Level 1 | **done** |
 | 3 | Multicast + targeting + canary | Level 2 | **done** |
-| 4 | Reliability + hardening (retries, audit, rate-limit, per-node secrets, TLS, signing) | Level 3 + Phase 4 | planned — **next** |
+| 4 | Reliability + hardening (retries, audit, rate-limit, per-node secrets, TLS, signing) | Level 3 + Phase 4 | **in progress** — 4a TLS done; retries/idempotency, sender-side audit, rate-limit, payload signing, per-node secrets/mTLS remaining |
 
 #### Increment 1 — Node / group / coordinator + reliable TCP spread — **done**
 
@@ -189,24 +189,32 @@ Shipped:
 
 Goal: make epidemic production-grade.
 
-- **TLS** on the coordinator→node hop (rustls); per-node secrets or mTLS
-  identity in place of the single shared group secret.
+- **TLS** on the coordinator→node hop (rustls) — **done (4a).** The node
+  serves `--tls --tls-cert --tls-key`; the coordinator spreads with
+  `--tls --tls-ca [--tls-server-name]`. Opt-in, so existing cleartext
+  loopback stays as-is. Config lives in `pandemic-common/src/tls.rs`
+  (`TlsServer`/`TlsClient`); the wire handshake is unchanged (TLS wraps the
+  stream). Tests: `pandemic-node` `tls_round_trip`, `tls_client_refuses_untrusted_node`,
+  `cleartext_client_cannot_talk_to_tls_node`.
+- per-node secrets or mTLS identity in place of the single shared group secret
+  — **remaining.**
 - **Retries + idempotency** on the apply; a **sender-side audit** entry per
-  spread (which nodes, which plan hash, per-node outcome).
-- **Rate limiting** to prevent spread storms.
+  spread (which nodes, which plan hash, per-node outcome) — **remaining.**
+- **Rate limiting** to prevent spread storms — **remaining.**
 - **Payload signing** (the production gate, shared with the registry): a node
-  only applies a deployment it can verify.
+  only applies a deployment it can verify — **remaining.**
 - **Acceptance:** a spread over an untrusted network is end-to-end encrypted and
   signed; a forged/unsigned deployment is refused; a dropped node is retried and
   reported, not silently lost.
 
 ### Resume point
 
-- **Next up: Increment 4 (reliability + hardening).** TLS on the
-  coordinator→node hop (rustls), per-node secrets / mTLS identity, retries +
-  idempotency, a sender-side audit entry per spread, rate limiting, and
-  **payload signing** (the production gate, shared with the registry). See the
-  Increment 4 section above for scope and acceptance.
+- **Next up: the rest of Increment 4 (reliability + hardening).** **4a (TLS on
+  the coordinator→node hop) is done** — see the Increment 4 section above.
+  Still to do: per-node secrets / mTLS identity, retries + idempotency, a
+  sender-side audit entry per spread, rate limiting, and **payload signing**
+  (the production gate, shared with the registry). See the Increment 4 section
+  for scope and acceptance.
 - **The gate to pass before an increment counts as done** (mirrors CI):
   `cargo build --workspace` && `cargo clippy --workspace -- -D warnings` &&
   `cargo fmt --check` && `cargo test --workspace`.
@@ -215,7 +223,12 @@ Goal: make epidemic production-grade.
     `generate_nonce`/`generate_secret`) + `EPIDEMIC_SECRET_PATH`.
   - `pandemic-common/src/wire.rs` — `authenticate_stream` +
     `send_request_stream` (shared framing for Unix + TCP).
-  - `pandemic-common/src/remote.rs` — `RemoteClient` (coordinator→node TCP).
+  - `pandemic-common/src/remote.rs` — `RemoteClient` (coordinator→node TCP);
+    `with_tls(TlsClient)` opts a connection into the TLS path.
+  - `pandemic-common/src/tls.rs` — `TlsServer`/`TlsClient` (rustls config,
+    ring provider, PEM in/out); the coordinator→node TLS hop (increment 4a).
+    Test fixtures: `pandemic-node/tests/fixtures/` (throwaway self-signed CA +
+    node cert/key + an unrelated CA).
   - `pandemic-common/src/discovery.rs` — mDNS advertise + probe
     (`advertise_node`, `discover_nodes`, `DiscoveredNode`, `SERVICE_FQDN`).
   - `pandemic-common/src/multicast.rs` — `send_intent` + `IntentListener`

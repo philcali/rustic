@@ -9,13 +9,16 @@
 use anyhow::Result;
 use pandemic_protocol::{AgentRequest, Response};
 use tokio::net::TcpStream;
+use tokio_rustls::TlsConnector;
 
-use crate::{agent, wire};
+use crate::{agent, wire, TlsClient};
 
-/// A node endpoint (`host:port`) plus the epidemic (network) shared secret.
+/// A node endpoint (`host:port`) plus the epidemic (network) shared secret,
+/// and (optionally) the TLS trust to encrypt the coordinator -> node hop.
 pub struct RemoteClient {
     addr: String,
     secret: String,
+    tls: Option<TlsClient>,
 }
 
 impl RemoteClient {
@@ -23,19 +26,45 @@ impl RemoteClient {
         Self {
             addr: addr.into(),
             secret: secret.into(),
+            tls: None,
         }
     }
 
-    /// Connect and complete the handshake. The node receiver holds the peer end.
+    /// Enable TLS for the coordinator -> node hop. `tls` carries the root CA
+    /// the node must chain to and the server name its cert must present. The
+    /// shared auth handshake then runs *inside* the TLS tunnel. Without this
+    /// the connection is cleartext TCP (the default).
+    pub fn with_tls(mut self, tls: TlsClient) -> Self {
+        self.tls = Some(tls);
+        self
+    }
+
+    /// Connect over cleartext TCP and complete the handshake. The node
+    /// receiver holds the peer end. (The TLS transport is selected
+    /// automatically by [`send_agent_request`] when [`with_tls`] is set.)
     pub async fn connect(&self) -> Result<TcpStream> {
         let stream = TcpStream::connect(&self.addr).await?;
         wire::authenticate_stream(stream, &self.secret).await
     }
 
-    /// Send one request to the node and read back the response.
+    /// Send one request to the node and read back the response, over whichever
+    /// transport is configured (cleartext TCP by default, or TLS when
+    /// [`with_tls`] is set). Both paths share the identical handshake +
+    /// framing — only the stream type differs.
     pub async fn send_agent_request(&self, request: &AgentRequest) -> Result<Response> {
-        let stream = self.connect().await?;
-        wire::send_request_stream(stream, request).await
+        match &self.tls {
+            Some(tls) => {
+                let tcp = TcpStream::connect(&self.addr).await?;
+                let connector = TlsConnector::from(tls.config.clone());
+                let stream = connector.connect(tls.server_name.clone(), tcp).await?;
+                let stream = wire::authenticate_stream(stream, &self.secret).await?;
+                wire::send_request_stream(stream, request).await
+            }
+            None => {
+                let stream = self.connect().await?;
+                wire::send_request_stream(stream, request).await
+            }
+        }
     }
 
     /// Liveness + capability probe: a `GetCapabilities` round-trip.

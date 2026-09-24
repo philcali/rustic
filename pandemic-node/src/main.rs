@@ -38,8 +38,9 @@ use tracing::{error, info, warn};
 
 use anyhow::Result;
 use clap::Parser;
-use pandemic_common::{auth, discovery, AgentClient, IntentListener};
+use pandemic_common::{auth, discovery, AgentClient, IntentListener, TlsServer};
 use pandemic_protocol::{AgentRequest, AuthChallenge, AuthResponse, Response};
+use tokio_rustls::TlsAcceptor;
 
 use allowlist::request_allowed;
 
@@ -101,6 +102,20 @@ pub struct Args {
     /// (repeatable; matched by `key=value` intent criteria).
     #[arg(long = "label", value_name = "KEY=VALUE")]
     pub label: Vec<String>,
+
+    // ── TLS (increment 4): encrypt the coordinator -> node hop ─────────────
+    /// Encrypt the TCP surface with TLS. The shared auth handshake then runs
+    /// inside the TLS tunnel. Requires `--tls-cert` + `--tls-key`.
+    #[arg(long)]
+    pub tls: bool,
+
+    /// Node TLS certificate (PEM: the leaf, optionally followed by its chain).
+    #[arg(long)]
+    pub tls_cert: Option<PathBuf>,
+
+    /// Node TLS private key (PEM: PKCS#8, PKCS#1/RSA, or SEC1/EC).
+    #[arg(long)]
+    pub tls_key: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -126,6 +141,26 @@ async fn main() -> Result<()> {
         pandemic_common::AGENT_SECRET_PATH,
         "agent",
     )?;
+
+    // TLS (increment 4): optionally encrypt the coordinator -> node hop. The
+    // cert + key build a rustls server config used to wrap every accepted
+    // connection before the shared handshake. Strictly opt-in — without it the
+    // surface stays cleartext TCP (as before).
+    let tls = if args.tls {
+        let cert = args
+            .tls_cert
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("--tls requires --tls-cert"))?;
+        let key = args
+            .tls_key
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("--tls requires --tls-key"))?;
+        let server = TlsServer::from_paths(cert, key)?;
+        info!("TLS enabled on the TCP surface (cert: {})", cert.display());
+        Some(server)
+    } else {
+        None
+    };
 
     let listener = TcpListener::bind(&args.listen).await?;
     info!(
@@ -198,10 +233,23 @@ async fn main() -> Result<()> {
                 let epidemic_secret = epidemic_secret.clone();
                 let agent_secret = agent_secret.clone();
                 let agent_socket = args.agent_socket.clone();
+                let tls = tls.clone();
                 tokio::spawn(async move {
                     let agent_client =
                         AgentClient::with_socket_path(agent_socket).with_secret(agent_secret);
-                    if let Err(e) = serve_node(stream, &epidemic_secret, &agent_client).await {
+                    // Encrypt first (when TLS is on), then run the identical
+                    // shared handshake + forwarding over the (possibly
+                    // encrypted) stream.
+                    let outcome = if let Some(server) = tls {
+                        let acceptor = TlsAcceptor::from(server.config.clone());
+                        match acceptor.accept(stream).await {
+                            Ok(stream) => serve_node(stream, &epidemic_secret, &agent_client).await,
+                            Err(e) => Err(anyhow::anyhow!("TLS handshake with {peer} failed: {e}")),
+                        }
+                    } else {
+                        serve_node(stream, &epidemic_secret, &agent_client).await
+                    };
+                    if let Err(e) = outcome {
                         warn!("connection from {peer} ended: {e}");
                     }
                 });
@@ -398,10 +446,19 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
-    use pandemic_common::RemoteClient;
+    use pandemic_common::{RemoteClient, TlsClient};
     use serde_json::json;
     use tempfile::tempdir;
     use tokio::net::UnixListener;
+
+    // Throwaway self-signed certs (see tests/fixtures/README.md) so the TLS
+    // tests exercise a real rustls handshake without a cert-gen dev-dependency.
+    // `ca.pem` is the trusted root; `other-ca.pem` is an unrelated CA that must
+    // NOT validate the node's cert.
+    const FIX_CA: &[u8] = include_bytes!("../tests/fixtures/ca.pem");
+    const FIX_SERVER_CERT: &[u8] = include_bytes!("../tests/fixtures/server.pem");
+    const FIX_SERVER_KEY: &[u8] = include_bytes!("../tests/fixtures/server-key.pem");
+    const FIX_OTHER_CA: &[u8] = include_bytes!("../tests/fixtures/other-ca.pem");
 
     /// A stand-in local agent: does the HMAC handshake with `agent_secret`,
     /// reads one request, and answers. Lets us exercise the node's handshake,
@@ -460,6 +517,32 @@ mod tests {
         addr.to_string()
     }
 
+    /// TLS variant of [`bind_node`]: wraps the accepted connection in TLS with
+    /// the test server cert before the shared handshake, mirroring a node run
+    /// with `--tls`. A failed TLS handshake just ends the (single-connection)
+    /// test server, matching the real node's "log and drop" behaviour.
+    async fn bind_node_tls(
+        epidemic_secret: &str,
+        agent_socket: &Path,
+        agent_secret: &str,
+    ) -> String {
+        let server = TlsServer::from_pem(FIX_SERVER_CERT, FIX_SERVER_KEY)
+            .expect("test fixtures parse as a TLS server config");
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let es = epidemic_secret.to_string();
+        let agent_client =
+            AgentClient::with_socket_path(agent_socket).with_secret(agent_secret.to_string());
+        tokio::spawn(async move {
+            let acceptor = tokio_rustls::TlsAcceptor::from(server.config.clone());
+            let (stream, _) = listener.accept().await.unwrap();
+            if let Ok(tls_stream) = acceptor.accept(stream).await {
+                let _ = serve_node(tls_stream, &es, &agent_client).await;
+            }
+        });
+        addr.to_string()
+    }
+
     #[tokio::test]
     async fn allowed_request_is_forwarded_to_agent() {
         let dir = tempdir().unwrap();
@@ -471,6 +554,63 @@ mod tests {
         let client = RemoteClient::new(node_addr, "epi-secret");
         let caps = client.ping().await.unwrap();
         assert_eq!(caps, vec!["fake-cap".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn tls_round_trip_authenticates_and_forwards() {
+        // Increment 4 (hardening): a TLS-wrapped coordinator -> node hop
+        // behaves identically to the cleartext one — handshake, then request.
+        let dir = tempdir().unwrap();
+        let agent_sock = dir.path().join("agent.sock");
+        spawn_fake_agent(&agent_sock, "agent-secret").await;
+
+        let node_addr = bind_node_tls("epi-secret", &agent_sock, "agent-secret").await;
+
+        let tls = TlsClient::from_pem(FIX_CA, "localhost").expect("client trusts the test CA");
+        let client = RemoteClient::new(node_addr, "epi-secret").with_tls(tls);
+        let caps = client.ping().await.expect("TLS round-trip should succeed");
+        assert_eq!(caps, vec!["fake-cap".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn tls_client_refuses_untrusted_node() {
+        // A node signed by the test CA must be rejected by a coordinator that
+        // only trusts an unrelated CA — the "forged deployment is refused"
+        // acceptance criterion, at the TLS layer.
+        let dir = tempdir().unwrap();
+        let agent_sock = dir.path().join("agent.sock");
+        spawn_fake_agent(&agent_sock, "agent-secret").await;
+
+        let node_addr = bind_node_tls("epi-secret", &agent_sock, "agent-secret").await;
+
+        let tls = TlsClient::from_pem(FIX_OTHER_CA, "localhost")
+            .expect("unrelated CA still parses as a trust anchor");
+        let client = RemoteClient::new(node_addr, "epi-secret").with_tls(tls);
+        assert!(
+            client.ping().await.is_err(),
+            "untrusted node cert must fail the TLS handshake"
+        );
+    }
+
+    #[tokio::test]
+    async fn cleartext_client_cannot_talk_to_tls_node() {
+        // A node run with --tls must not serve a cleartext client: it blocks in
+        // the TLS handshake waiting for a ClientHello, so the round-trip never
+        // completes (guarded by a timeout so a regression can't hang the suite).
+        let dir = tempdir().unwrap();
+        let agent_sock = dir.path().join("agent.sock");
+        spawn_fake_agent(&agent_sock, "agent-secret").await;
+
+        let node_addr = bind_node_tls("epi-secret", &agent_sock, "agent-secret").await;
+
+        let client = RemoteClient::new(node_addr, "epi-secret"); // no TLS
+                                                                 // Fails fast (connection reset) or hangs (node waiting for a ClientHello);
+                                                                 // a short guard keeps the suite snappy without masking a regression.
+        let outcome = tokio::time::timeout(Duration::from_secs(2), client.ping()).await;
+        assert!(
+            !matches!(outcome, Ok(Ok(_))),
+            "a cleartext client must not succeed against a TLS node"
+        );
     }
 
     #[tokio::test]

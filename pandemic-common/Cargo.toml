@@ -36,6 +36,13 @@ rustix = { version = "1", features = ["time"] }
 tar = "0.4"
 flate2 = "1.0"
 tempfile = "3.0"
+# Epidemic increment 4 (hardening): TLS on the coordinator -> node hop. rustls
+# (ring provider) + PEM parsing for cert/key material, and tokio-rustls for the
+# async TLS streams. All three are already in the lockfile (pandemic-iam /
+# reqwest), so this introduces no new heavy dependency.
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+rustls-pemfile = "2.0"
+tokio-rustls = "0.26"
 
 [dev-dependencies]
 tokio-test = "0.4"

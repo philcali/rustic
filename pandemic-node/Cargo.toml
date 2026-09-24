@@ -17,6 +17,9 @@ clap = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 libc = "0.2"
+# Epidemic increment 4 (hardening): wrap the accepted TCP connection in TLS
+# before the shared handshake (see pandemic-common::tls for the cert config).
+tokio-rustls = "0.26"
 
 [dev-dependencies]
 tempfile = "3.0"
