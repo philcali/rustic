@@ -54,7 +54,8 @@ Epidemic infections enable configuration and updates to "spread" across pandemic
 | 1 | Node / group / coordinator + reliable TCP spread | Foundation | **done** (v0.5.0) |
 | 2 | Discovery (mDNS/Bonjour) — roster discovery | Level 1 | **done** |
 | 3 | Multicast + targeting + canary | Level 2 | **done** |
-| 4 | Reliability + hardening (retries, audit, rate-limit, per-node secrets, TLS, signing) | Level 3 + Phase 4 | **in progress** — 4a TLS done; retries/idempotency, sender-side audit, rate-limit, payload signing, per-node secrets/mTLS remaining |
+| 4 | Reliability + hardening (retries, audit, rate-limit, per-node secrets, TLS, signing) | Level 3 + Phase 4 | **in progress** — 4a TLS done; sender-side audit done (shipped as 5a); retries/idempotency, rate-limit, payload signing, per-node secrets/mTLS remaining |
+| 5 | Epidemic observability (console / UI to see + manage the spread) | Cross-cutting (all levels) | **in progress** — 5a audit/record foundation **done**; 5b read-only console, 5c trigger + live progress remaining |
 
 #### Increment 1 — Node / group / coordinator + reliable TCP spread — **done**
 
@@ -198,8 +199,9 @@ Goal: make epidemic production-grade.
   `cleartext_client_cannot_talk_to_tls_node`.
 - per-node secrets or mTLS identity in place of the single shared group secret
   — **remaining.**
-- **Retries + idempotency** on the apply; a **sender-side audit** entry per
-  spread (which nodes, which plan hash, per-node outcome) — **remaining.**
+- **Retries + idempotency** on the apply — **remaining.** (The sibling
+  **sender-side audit** entry per spread — which nodes, which plan hash,
+  per-node outcome — **shipped as 5a**, the audit/record foundation.)
 - **Rate limiting** to prevent spread storms — **remaining.**
 - **Payload signing** (the production gate, shared with the registry): a node
   only applies a deployment it can verify — **remaining.**
@@ -207,13 +209,77 @@ Goal: make epidemic production-grade.
   signed; a forged/unsigned deployment is refused; a dropped node is retried and
   reported, not silently lost.
 
+#### Increment 5 — Epidemic observability (console / UI) — **in progress** (5a done)
+
+Goal: a human can **see the spread** — which roster groups exist, what has been
+spread, to which nodes, and each node's outcome — and, later, **manage** it
+(trigger a spread and watch it progress) from the console, not only the CLI.
+
+Context / why this is new: the console (`pandemic-console`) serves the static SPA
+and registers as a daemon plugin, but has **no epidemic surface today**; the REST
+API (`pandemic-rest`) exposes no epidemic endpoints. Two traps to keep straight:
+(1) the console's existing "Groups" tab is **IAM user-groups**, *not* epidemic
+**node rosters** — this increment adds the latter; (2) there is no persistent
+"infected nodes" registry — a node is a roster config entry plus the spread
+events it produced — so **"see the spread" is the honest first slice**, ahead of
+"manage."
+
+- **5a — the audit/record foundation — done.** Both spread paths now record one
+  `SpreadRecord` per spread (the roster path previously printed results and
+  exited *without* recording; no path recorded per-node detail). `SpreadRecord`
+  now carries per-node results (`name` / `addr` / `ok` / `error`), the target
+  group (roster `--group`), the plan hash (`sha256`), `mode` (roster/broadcast),
+  `stage`, `origin`/`criteria`/`canary` (broadcast). `spread-history.log` is
+  **JSONL** (one JSON line per spread) with **legacy TSV lines still readable**
+  (`legacy_tsv_record`), so an operator's existing history survives. The
+  `SpreadRecord`/`SpreadMode`/`SpreadNodeResult` types live in
+  **`pandemic-protocol`** (a deliberate deviation from the original code map's
+  "CLI + per-node type in protocol" so that 5b's `pandemic-rest` reads the same
+  wire types — one source of truth). *This item **was** the still-remaining
+  Increment 4 "sender-side audit entry per spread" — folded in here because it
+  is the substrate for observability, not a duplicate.*
+  - **Acceptance (met):** in the e2e container, a roster spread-to-self records
+    a JSON line (`mode=roster`, `group` present only for `--group`, per-node
+    `✓/✗` + error), a partial spread (good node + dead port) records the mixed
+    outcome **and** exits non-zero, a broadcast records `mode=broadcast` +
+    `origin` + the dialing node's `addr`, and `epidemic spreads` renders all of
+    it newest-first (including a pre-existing TSV line in the same file).
+  - **Gate green:** build + clippy + fmt + test (247 passing, 26 suites). New
+    tests: `spread_record_round_trips_as_one_json_line`,
+    `spread_record_missing_optionals_default`, `legacy_tsv_lines_still_load`,
+    `legacy_and_json_lines_mix_in_one_file`, `roster_record_shapes_the_audit_entry`,
+    `broadcast_node_results_maps_each_callback`.
+  - **Bug fixed along the way:** `default_groups_path` fell back to
+    `$HOME/pandemic/groups.toml`, contradicting the docs (`~/.config/pandemic/
+    groups.toml`, honoring `$XDG_CONFIG_HOME`). Now matches the XDG default;
+    verified in the e2e container (a group written to the documented path is
+    found by `epidemic nodes` / `spread --group`).
+- **5b — read-only "see the spread."** REST: `GET /api/epidemic/spreads?limit=N`
+  (history, newest first, per-node detail) and `GET /api/epidemic/groups`
+  (roster groups + nodes from `groups.toml`). Console: a new **Epidemic** tab —
+  the roster groups, and a spread-history table with per-node ✓/✗, the error, and
+  the plan hash.
+- **5c — manage the spread (later).** Trigger a spread from the console
+  (`POST /api/epidemic/spread`) and stream live progress over the existing
+  `/api/events/stream` websocket.
+
+- **Acceptance:** the operator opens the console and sees the roster groups plus a
+  history of spreads with each node's outcome and error (roster *and* broadcast
+  spreads); triggering a spread from the console works end-to-end and reports
+  progress live.
+
 ### Resume point
 
-- **Next up: the rest of Increment 4 (reliability + hardening).** **4a (TLS on
-  the coordinator→node hop) is done** — see the Increment 4 section above.
-  Still to do: per-node secrets / mTLS identity, retries + idempotency, a
-  sender-side audit entry per spread, rate limiting, and **payload signing**
-  (the production gate, shared with the registry). See the Increment 4 section
+- **Next up: 5b — read-only "see the spread" (the console / UI).** The 5a
+  record foundation is done and committed: both spread paths write a JSONL
+  `SpreadRecord` (per-node detail, group, plan hash), readable by
+  `epidemic spreads` and ready for the console. 5b adds the REST read surface
+  (`GET /api/epidemic/spreads`, `GET /api/epidemic/groups` in `pandemic-rest`)
+  and the **Epidemic** tab in `pandemic-console/web/src/` (distinct from the
+  IAM "Groups" tab). Then 5c (trigger + live progress). The rest of
+  Increment 4 (per-node secrets / mTLS identity, retries + idempotency, rate
+  limiting, and **payload signing** — the production gate, shared with the
+  registry) stays open and is independent of 5b–5c. See the Increment 5 section
   for scope and acceptance.
 - **The gate to pass before an increment counts as done** (mirrors CI):
   `cargo build --workspace` && `cargo clippy --workspace -- -D warnings` &&
@@ -254,8 +320,18 @@ Goal: make epidemic production-grade.
     `print_dry_run` (shared by `deployment install` **and** `epidemic spread`).
   - `pandemic-agent/src/main.rs` — agent server (shares `auth`).
   - `pandemic-protocol/` — `AgentRequest`, `Response`, `AuthChallenge`/
-    `AuthResponse`, **and** the broadcast types `SpreadStage`, `Canary`,
-    `PlanIdentity`, `SpreadIntent`.
+    `AuthResponse`, the broadcast types `SpreadStage`, `Canary`, `PlanIdentity`,
+    `SpreadIntent`, **and** (5a) the shared spread-history types `SpreadRecord`,
+    `SpreadMode`, `SpreadNodeResult` — in protocol (not the CLI) so 5b's REST
+    reads the exact same wire shape.
+  - **Increment 5 — 5a done, 5b/5c not yet built.** 5a's data model:
+    `pandemic-cli/src/epidemic.rs` (roster + broadcast both build a
+    `SpreadRecord` via `roster_record`/`broadcast_node_results`; `append_record`
+    writes JSONL; `load_spreads` reads JSONL + legacy TSV) and the types above.
+    5b/5c still to build: the read surface in `pandemic-rest/src/main.rs`
+    (`GET /api/epidemic/spreads`, `GET /api/epidemic/groups`, and later
+    `POST /api/epidemic/spread`); the UI in `pandemic-console/web/src/` (a new
+    **Epidemic** tab, distinct from the IAM "Groups" tab).
   - How-to: `docs/epidemic.md`; operator loop: `e2e/README.md` (epidemic section).
 
 ---

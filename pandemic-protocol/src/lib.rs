@@ -571,6 +571,84 @@ pub struct SpreadIntent {
     pub callback_port: u16,
 }
 
+// ── Epidemic spread history (increment 5a): the coordinator's audit record ──
+//
+// The coordinator records every spread — roster *and* broadcast — as one JSON
+// line in the spread history (default
+// `~/.local/state/pandemic/spread-history.log`). The record carries the plan
+// identity (name / version / sha256), the targeting, and the per-node
+// outcomes, so a human (and the console, increment 5b) can see what was
+// spread where and what each node did with it.
+
+/// How a spread reached its nodes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SpreadMode {
+    /// The coordinator applied the plan to an explicit roster
+    /// (`epidemic spread --group/--node`).
+    Roster,
+    /// The coordinator broadcast the intent and nodes self-selected and dialed
+    /// back (`epidemic spread --broadcast`).
+    Broadcast,
+}
+
+/// One node's outcome in a recorded spread (coordinator's view).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpreadNodeResult {
+    /// The node's name — its roster name, or its callback peer address for a
+    /// broadcast (the coordinator never learns a broadcast node's name).
+    pub name: String,
+    /// The node's endpoint `host:port`.
+    pub addr: String,
+    /// Did the node apply the deployment?
+    pub ok: bool,
+    /// The failure message (when `ok` is false).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// One recorded spread: one JSON line of the spread history.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpreadRecord {
+    /// Unix seconds when the spread was issued.
+    pub timestamp: i64,
+    /// The spread's identity — the broadcast's de-duplication key; a fresh
+    /// id for roster spreads.
+    pub spread_id: String,
+    /// How the spread reached its nodes.
+    pub mode: SpreadMode,
+    /// `full` / `canary` / `promote` (broadcast stages; roster is `full`).
+    pub stage: String,
+    /// The deployment's name.
+    pub name: String,
+    /// The deployment's version.
+    pub version: String,
+    /// sha256 of the concrete `ApplyDeployment` plan (the same digest the
+    /// broadcast intent carries).
+    pub sha256: String,
+    /// The named target group (roster path); absent for ad-hoc / broadcast.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    /// The coordinator's callback origin (broadcast).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
+    /// Targeting criteria (broadcast; empty = every node in the group).
+    #[serde(default)]
+    pub criteria: Vec<String>,
+    /// The canary cohort (broadcast canary stage).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canary: Option<Canary>,
+    /// Per-node outcomes.
+    #[serde(default)]
+    pub nodes: Vec<SpreadNodeResult>,
+    /// How many nodes applied.
+    pub applied: u32,
+    /// How many nodes failed.
+    pub failed: u32,
+    /// Every node the coordinator reached applied, with no failures.
+    pub ok: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1078,5 +1156,71 @@ mod tests {
             serde_json::to_string(&SpreadStage::Full).unwrap(),
             r#""full""#
         );
+    }
+
+    #[test]
+    fn spread_record_round_trips_as_one_json_line() {
+        let record = SpreadRecord {
+            timestamp: 1_750_000_123,
+            spread_id: "8f3a1c02d4e5b6a7".to_string(),
+            mode: SpreadMode::Roster,
+            stage: "full".to_string(),
+            name: "webapp".to_string(),
+            version: "1.2.3".to_string(),
+            sha256: "cd".repeat(32),
+            group: Some("edge".to_string()),
+            origin: None,
+            criteria: Vec::new(),
+            canary: None,
+            nodes: vec![
+                SpreadNodeResult {
+                    name: "edge-1".to_string(),
+                    addr: "10.0.0.1:7711".to_string(),
+                    ok: true,
+                    error: None,
+                },
+                SpreadNodeResult {
+                    name: "edge-2".to_string(),
+                    addr: "10.0.0.2:7711".to_string(),
+                    ok: false,
+                    error: Some("node 10.0.0.2:7711 failed to apply".to_string()),
+                },
+            ],
+            applied: 1,
+            failed: 1,
+            ok: false,
+        };
+
+        let line = serde_json::to_string(&record).unwrap();
+        assert!(!line.contains('\n'), "a record is one JSON line: {line}");
+        let back: SpreadRecord = serde_json::from_str(&line).unwrap();
+        assert_eq!(back, record);
+        // The mode is snake_case on the wire (the console keys on it).
+        assert!(line.contains(r#""mode":"roster""#), "got: {line}");
+    }
+
+    #[test]
+    fn spread_record_missing_optionals_default() {
+        // A minimal line (e.g. a record written before a field existed)
+        // still parses — the console must not break on history evolution.
+        let json = r#"{
+            "timestamp": 0,
+            "spread_id": "x",
+            "mode": "broadcast",
+            "stage": "full",
+            "name": "n",
+            "version": "1",
+            "sha256": "ab",
+            "applied": 0,
+            "failed": 0,
+            "ok": true
+        }"#;
+        let rec: SpreadRecord = serde_json::from_str(json).unwrap();
+        assert_eq!(rec.mode, SpreadMode::Broadcast);
+        assert!(rec.group.is_none());
+        assert!(rec.origin.is_none());
+        assert!(rec.criteria.is_empty());
+        assert!(rec.canary.is_none());
+        assert!(rec.nodes.is_empty());
     }
 }

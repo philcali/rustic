@@ -9,9 +9,14 @@ Planned improvements for the Pandemic codebase.
   1–3 are done**: node + group + coordinator over reliable TCP, mDNS discovery
   (node advertises; `epidemic nodes/spread --discover`), and multicast
   **broadcast + targeting + canary/promote** (node joins the intent group;
-  `epidemic spread --broadcast`; `epidemic spreads` history). Increment 4
-  (reliability + TLS/signing) is planned. The codified, cross-session build
-  plan — fixed decisions, increment status, resume point, and code map — lives in
+  `epidemic spread --broadcast`; `epidemic spreads` history). **4a (TLS on the
+  coordinator→node hop) is done**, as is **5a (the audit/record foundation:
+  every spread — roster and broadcast — writes one JSONL `SpreadRecord` with
+  per-node ✓/✗ + error, the target group, and the plan hash; legacy TSV history
+  still readable)**. Still open: the rest of Increment 4 (retries + idempotency,
+  rate limiting, payload signing, per-node secrets/mTLS) and 5b/5c (console
+  read surface + trigger/live progress). The codified, cross-session build plan
+  — fixed decisions, increment status, resume point, and code map — lives in
   [`ideas/epidemic_infections.md`](ideas/epidemic_infections.md).
   Operator how-to: [`docs/epidemic.md`](docs/epidemic.md).
 

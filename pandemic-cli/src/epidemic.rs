@@ -45,7 +45,7 @@ use pandemic_common::{
 };
 use pandemic_protocol::{
     AgentRequest, AuthChallenge, AuthResponse, Canary, PlanIdentity, Response, SpreadIntent,
-    SpreadStage,
+    SpreadMode, SpreadNodeResult, SpreadRecord, SpreadStage,
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
@@ -179,7 +179,7 @@ pub enum EpidemicAction {
         #[arg(long)]
         tls_server_name: Option<String>,
     },
-    /// List recent broadcast spreads (newest first)
+    /// List recent spreads (roster + broadcast, newest first)
     Spreads {
         /// How many recent spreads to show
         #[arg(long, default_value_t = 20)]
@@ -413,6 +413,7 @@ async fn spread(
     };
 
     let name = dp.spec.meta.name.clone();
+    let version = dp.spec.meta.version.clone();
     let mut results: Vec<(NodeConfig, Result<()>)> = Vec::new();
     for node in &roster {
         let node_tls = if let Some(trust) = tls_trust.as_ref() {
@@ -427,8 +428,99 @@ async fn spread(
         results.push((node.clone(), outcome));
     }
 
+    // 5. Record the spread (5a: the roster path is audited like the broadcast
+    //    path — which nodes, which plan hash, per-node outcomes), then report.
+    //    A partial spread is recorded *as a failure* and then reported as one.
+    let request_line =
+        serde_json::to_string(&base_request).with_context(|| "encoding the plan for the record")?;
+    record_spread(&roster_record(
+        &generate_spread_id(),
+        group,
+        &name,
+        &version,
+        &sha256_hex(&request_line),
+        &results,
+    ))?;
+
     print_results(&name, &results)?;
     Ok(())
+}
+
+/// The audit record for a roster spread (5a): which nodes, which plan hash,
+/// and each node's outcome. Pure, so the shape is testable without a network.
+fn roster_record(
+    spread_id: &str,
+    group: Option<&str>,
+    name: &str,
+    version: &str,
+    plan_sha: &str,
+    results: &[(NodeConfig, Result<()>)],
+) -> SpreadRecord {
+    let nodes = roster_node_results(results);
+    let applied = nodes.iter().filter(|n| n.ok).count() as u32;
+    let failed = (nodes.len() - applied as usize) as u32;
+    let ok = !nodes.is_empty() && failed == 0;
+    SpreadRecord {
+        timestamp: now_unix_secs(),
+        spread_id: spread_id.to_string(),
+        mode: SpreadMode::Roster,
+        stage: "full".to_string(),
+        name: name.to_string(),
+        version: version.to_string(),
+        sha256: plan_sha.to_string(),
+        group: group.map(str::to_string),
+        origin: None,
+        criteria: Vec::new(),
+        canary: None,
+        nodes,
+        applied,
+        failed,
+        ok,
+    }
+}
+
+/// Per-node results from the roster path (the coordinator knows each node's
+/// name and address from the roster).
+fn roster_node_results(results: &[(NodeConfig, Result<()>)]) -> Vec<SpreadNodeResult> {
+    results
+        .iter()
+        .map(|(node, outcome)| match outcome {
+            Ok(()) => SpreadNodeResult {
+                name: node.name.clone(),
+                addr: node.addr.clone(),
+                ok: true,
+                error: None,
+            },
+            Err(e) => SpreadNodeResult {
+                name: node.name.clone(),
+                addr: node.addr.clone(),
+                ok: false,
+                error: Some(e.to_string()),
+            },
+        })
+        .collect()
+}
+
+/// Per-node results from the broadcast path (the coordinator only learns each
+/// node's callback peer address — never its name).
+fn broadcast_node_results(callbacks: &[(SocketAddr, Response)]) -> Vec<SpreadNodeResult> {
+    callbacks
+        .iter()
+        .map(|(peer, response)| match response {
+            Response::Success { .. } => SpreadNodeResult {
+                name: peer.to_string(),
+                addr: peer.to_string(),
+                ok: true,
+                error: None,
+            },
+            Response::Error { message } | Response::NotFound { message } => SpreadNodeResult {
+                name: peer.to_string(),
+                addr: peer.to_string(),
+                ok: false,
+                error: Some(message.clone()),
+            },
+        })
+        .collect()
 }
 
 /// Resolve the coordinator's target list: the named group's roster plus any
@@ -943,14 +1035,16 @@ async fn report_and_record(
     record_spread(&SpreadRecord {
         timestamp: intent.issued_at,
         spread_id: spread_id.to_string(),
+        mode: SpreadMode::Broadcast,
         stage: stage_str.to_string(),
         name: name.to_string(),
         version: intent.plan.version.clone(),
         sha256: intent.plan.sha256.clone(),
-        origin: intent.origin.clone(),
-        criteria: intent.criteria.join(";"),
-        canary: describe_canary(bcast.canary.as_ref()),
-        callbacks: callbacks.len() as u32,
+        group: None,
+        origin: Some(intent.origin.clone()),
+        criteria: intent.criteria.clone(),
+        canary: bcast.canary.clone(),
+        nodes: broadcast_node_results(callbacks),
         applied,
         failed,
         ok,
@@ -987,28 +1081,14 @@ fn describe_canary(canary: Option<&Canary>) -> String {
     }
 }
 
-// ── Broadcast history (`epidemic spreads`) ─────────────────────────────────
+// ── Spread history (`epidemic spreads`) ────────────────────────────────────
+//
+// One record per spread (roster *and* broadcast), one JSON line each (5a).
+// The record type is shared with the console's REST surface (5b) in
+// `pandemic-protocol`.
 
-/// One recorded broadcast, one TSV line. Fields are tab/newline-free.
-#[derive(Debug, Clone)]
-struct SpreadRecord {
-    timestamp: i64,
-    spread_id: String,
-    stage: String,
-    name: String,
-    version: String,
-    sha256: String,
-    origin: String,
-    criteria: String,
-    canary: String,
-    callbacks: u32,
-    applied: u32,
-    failed: u32,
-    ok: bool,
-}
-
-/// Where broadcast history is stored: `$XDG_STATE_HOME/pandemic/…`, falling
-/// back to `~/.local/state/pandemic/…`, then `/etc/pandemic/`.
+/// Where spread history is stored: `$XDG_STATE_HOME/pandemic/…`, falling back
+/// to `~/.local/state/pandemic/…`, then `/etc/pandemic/`.
 fn spread_history_path() -> Result<PathBuf> {
     if let Some(state) = std::env::var_os("XDG_STATE_HOME") {
         return Ok(PathBuf::from(state).join("pandemic/spread-history.log"));
@@ -1019,38 +1099,18 @@ fn spread_history_path() -> Result<PathBuf> {
     Ok(PathBuf::from("/etc/pandemic/spread-history.log"))
 }
 
-/// Strip characters that would corrupt a TSV field.
-fn sanitize(field: &str) -> String {
-    field.replace(['\t', '\n', '\r'], " ")
-}
-
 /// Append one record to the default history file.
 fn record_spread(record: &SpreadRecord) -> Result<()> {
     append_record(&spread_history_path()?, record)
 }
 
-/// Append one record as a TSV line, creating the file (and parent dir).
+/// Append one record as a JSON line, creating the file (and parent dir).
 fn append_record(path: &std::path::Path, record: &SpreadRecord) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating {}", parent.display()))?;
     }
-    let line = [
-        record.timestamp.to_string(),
-        sanitize(&record.spread_id),
-        sanitize(&record.stage),
-        sanitize(&record.name),
-        sanitize(&record.version),
-        sanitize(&record.sha256),
-        sanitize(&record.origin),
-        sanitize(&record.criteria),
-        sanitize(&record.canary),
-        record.callbacks.to_string(),
-        record.applied.to_string(),
-        record.failed.to_string(),
-        record.ok.to_string(),
-    ]
-    .join("\t");
+    let line = serde_json::to_string(record).with_context(|| "encoding the spread record")?;
     use std::io::Write;
     let mut f = std::fs::OpenOptions::new()
         .create(true)
@@ -1062,6 +1122,9 @@ fn append_record(path: &std::path::Path, record: &SpreadRecord) -> Result<()> {
 }
 
 /// Read the most recent `limit` records (newest first) from the history file.
+/// JSON lines (5a and later) parse straight into [`SpreadRecord`]; legacy TSV
+/// lines (pre-5a broadcasts) map onto the same shape with no per-node detail
+/// — an operator's old history stays visible instead of vanishing.
 fn load_spreads(path: &std::path::Path, limit: usize) -> Vec<SpreadRecord> {
     let Ok(text) = std::fs::read_to_string(path) else {
         return Vec::new();
@@ -1069,63 +1132,117 @@ fn load_spreads(path: &std::path::Path, limit: usize) -> Vec<SpreadRecord> {
     text.lines()
         .filter(|l| !l.trim().is_empty())
         .filter_map(|line| {
-            let f: Vec<&str> = line.split('\t').collect();
-            if f.len() < 13 {
-                return None;
+            let line = line.trim();
+            if line.starts_with('{') {
+                serde_json::from_str(line).ok()
+            } else {
+                legacy_tsv_record(line)
             }
-            Some(SpreadRecord {
-                timestamp: f[0].parse().unwrap_or(0),
-                spread_id: f[1].to_string(),
-                stage: f[2].to_string(),
-                name: f[3].to_string(),
-                version: f[4].to_string(),
-                sha256: f[5].to_string(),
-                origin: f[6].to_string(),
-                criteria: f[7].to_string(),
-                canary: f[8].to_string(),
-                callbacks: f[9].parse().unwrap_or(0),
-                applied: f[10].parse().unwrap_or(0),
-                failed: f[11].parse().unwrap_or(0),
-                ok: f[12] == "true",
-            })
         })
         .rev()
         .take(limit)
         .collect()
 }
 
-/// `epidemic spreads`: print recent broadcast history (newest first).
+/// Map one pre-5a TSV history line onto the current record shape (13 fields:
+/// timestamp, spread_id, stage, name, version, sha256, origin, criteria,
+/// canary, callbacks, applied, failed, ok). Per-node detail did not exist
+/// then, so `nodes` is empty.
+fn legacy_tsv_record(line: &str) -> Option<SpreadRecord> {
+    let f: Vec<&str> = line.split('\t').collect();
+    if f.len() < 13 {
+        return None;
+    }
+    Some(SpreadRecord {
+        timestamp: f[0].parse().ok()?,
+        spread_id: f[1].to_string(),
+        mode: SpreadMode::Broadcast,
+        stage: f[2].to_string(),
+        name: f[3].to_string(),
+        version: f[4].to_string(),
+        sha256: f[5].to_string(),
+        group: None,
+        origin: if f[6].is_empty() {
+            None
+        } else {
+            Some(f[6].to_string())
+        },
+        criteria: f[7]
+            .split(';')
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect(),
+        canary: legacy_canary(f[8]),
+        nodes: Vec::new(),
+        applied: f[10].parse().ok()?,
+        failed: f[11].parse().ok()?,
+        ok: f[12] == "true",
+    })
+}
+
+/// A legacy `canary` TSV field: `pct=25`, `subset=KEY=VALUE`, or empty.
+fn legacy_canary(s: &str) -> Option<Canary> {
+    if let Some(pct) = s.strip_prefix("pct=") {
+        pct.parse().ok().map(|pct| Canary::Percentage { pct })
+    } else if let Some(criterion) = s.strip_prefix("subset=") {
+        (!criterion.is_empty()).then(|| Canary::Subset {
+            criterion: criterion.to_string(),
+        })
+    } else {
+        None
+    }
+}
+
+/// `epidemic spreads`: print recent spread history (newest first), with each
+/// node's outcome where the record carries one.
 async fn spreads(limit: u32) -> Result<()> {
     let path = spread_history_path()?;
     let records = load_spreads(&path, limit as usize);
     if records.is_empty() {
-        println!("No broadcast spreads recorded yet at {}.", path.display());
-        println!("  Run `epidemic spread <target> --broadcast` to create one.");
+        println!("No spreads recorded yet at {}.", path.display());
+        println!("  Run `epidemic spread <target>` to create one.");
         return Ok(());
     }
-    println!(
-        "Recent broadcast spreads ({} shown, newest first):\n",
-        records.len()
-    );
+    println!("Recent spreads ({} shown, newest first):\n", records.len());
     for r in &records {
-        let when = r.timestamp;
         println!(
-            "  {}  {}  {} v{}  applied={}/{}  ok={}",
-            human_timestamp(when),
+            "  {}  {}  {} v{}  [{} {}]  applied={} failed={}",
+            human_timestamp(r.timestamp),
             if r.ok { "✓" } else { "✗" },
             r.name,
             r.version,
+            match r.mode {
+                SpreadMode::Roster => "roster",
+                SpreadMode::Broadcast => "broadcast",
+            },
+            r.stage,
             r.applied,
-            r.callbacks,
-            r.ok
+            r.failed
         );
         println!("      spread_id={}", r.spread_id);
-        println!("      stage={}  origin={}", r.stage, r.origin);
-        if !r.criteria.is_empty() {
-            println!("      criteria={}", r.criteria);
+        if let Some(g) = &r.group {
+            println!("      group={g}");
         }
-        if !r.canary.is_empty() {
-            println!("      canary={}", r.canary);
+        if let Some(o) = &r.origin {
+            println!("      origin={o}");
+        }
+        if !r.criteria.is_empty() {
+            println!("      criteria={}", r.criteria.join(";"));
+        }
+        if let Some(c) = &r.canary {
+            println!("      canary={}", describe_canary(Some(c)));
+        }
+        for n in &r.nodes {
+            if n.ok {
+                println!("      ✓  {}/{}", n.name, n.addr);
+            } else {
+                println!(
+                    "      ✗  {}/{}  {}",
+                    n.name,
+                    n.addr,
+                    n.error.as_deref().unwrap_or("failed")
+                );
+            }
         }
         println!();
     }
@@ -1476,10 +1593,20 @@ addr = "10.0.0.1:7711"
         assert!(intent.group.is_none());
     }
 
+    fn sample_node(ok: bool, name: &str, addr: &str) -> SpreadNodeResult {
+        SpreadNodeResult {
+            name: name.to_string(),
+            addr: addr.to_string(),
+            ok,
+            error: (!ok).then(|| format!("node {addr} failed to apply")),
+        }
+    }
+
     fn sample_record(ts: i64, sid: &str, ok: bool) -> SpreadRecord {
         SpreadRecord {
             timestamp: ts,
             spread_id: sid.to_string(),
+            mode: SpreadMode::Broadcast,
             stage: if ok {
                 "full".to_string()
             } else {
@@ -1488,10 +1615,15 @@ addr = "10.0.0.1:7711"
             name: "webapp".to_string(),
             version: "1.2.3".to_string(),
             sha256: "cd".repeat(32),
-            origin: "192.168.1.5".to_string(),
-            criteria: "role=edge;env=prod".to_string(),
-            canary: "pct=25".to_string(),
-            callbacks: 3,
+            group: None,
+            origin: Some("192.168.1.5".to_string()),
+            criteria: vec!["role=edge".to_string(), "env=prod".to_string()],
+            canary: Some(Canary::Percentage { pct: 25 }),
+            nodes: vec![
+                sample_node(true, "edge-1", "10.0.0.1:7711"),
+                sample_node(true, "edge-3", "10.0.0.3:7711"),
+                sample_node(false, "edge-2", "10.0.0.2:7711"),
+            ],
             applied: 2,
             failed: 1,
             ok,
@@ -1514,13 +1646,21 @@ addr = "10.0.0.1:7711"
         assert_eq!(all[1].spread_id, "bbbb");
         assert_eq!(all[2].spread_id, "aaaa");
 
-        // Fields survive the round-trip.
+        // Fields survive the round-trip — including the structured per-node
+        // detail that is the point of 5a.
         assert_eq!(all[0].timestamp, 3000);
         assert_eq!(all[0].name, "webapp");
         assert_eq!(all[0].version, "1.2.3");
-        assert_eq!(all[0].criteria, "role=edge;env=prod");
-        assert_eq!(all[0].canary, "pct=25");
-        assert_eq!(all[0].callbacks, 3);
+        assert_eq!(
+            all[0].criteria,
+            vec!["role=edge".to_string(), "env=prod".to_string()]
+        );
+        assert_eq!(all[0].canary, Some(Canary::Percentage { pct: 25 }));
+        assert_eq!(all[0].nodes.len(), 3);
+        assert_eq!(all[0].nodes[2].addr, "10.0.0.2:7711");
+        assert!(!all[0].nodes[2].ok);
+        assert!(all[0].nodes[2].error.is_some());
+        assert!(all[0].nodes[0].error.is_none());
         assert_eq!(all[0].applied, 2);
         assert_eq!(all[0].failed, 1);
         assert!(all[0].ok);
@@ -1536,8 +1676,132 @@ addr = "10.0.0.1:7711"
     }
 
     #[test]
-    fn sanitize_strips_tsv_breakers() {
-        assert_eq!(sanitize("a\tb\nc\rd"), "a b c d");
+    fn legacy_tsv_lines_still_load() {
+        // A pre-5a history file (TSV, no per-node detail) stays readable.
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("history.log");
+        std::fs::write(
+            &path,
+            "1750000000\t8f3a\tfull\twebapp\t1.2.3\tcdcd\t192.168.1.5\trole=edge;env=prod\tpct=25\t3\t2\t1\ttrue\n",
+        )
+        .unwrap();
+
+        let rec = load_spreads(&path, 10);
+        assert_eq!(rec.len(), 1);
+        let r = &rec[0];
+        assert_eq!(r.spread_id, "8f3a");
+        assert_eq!(r.mode, SpreadMode::Broadcast);
+        assert_eq!(r.origin.as_deref(), Some("192.168.1.5"));
+        assert_eq!(
+            r.criteria,
+            vec!["role=edge".to_string(), "env=prod".to_string()]
+        );
+        assert_eq!(r.canary, Some(Canary::Percentage { pct: 25 }));
+        assert!(r.nodes.is_empty(), "legacy lines carry no per-node detail");
+        assert_eq!(r.applied, 2);
+        assert_eq!(r.failed, 1);
+        assert!(r.ok);
+
+        // Malformed lines are skipped, not fatal.
+        let dir2 = tempdir().unwrap();
+        let path2 = dir2.path().join("history.log");
+        std::fs::write(&path2, "not\tenough\tfields\n").unwrap();
+        assert!(load_spreads(&path2, 10).is_empty());
+    }
+
+    #[test]
+    fn legacy_and_json_lines_mix_in_one_file() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("history.log");
+        // A legacy line first, then a JSON record — both load, newest first.
+        std::fs::write(
+            &path,
+            "1750000000\tlegacy-1\tfull\twebapp\t1.0.0\tab\t10.0.0.9\t\t\t1\t1\t0\ttrue\n",
+        )
+        .unwrap();
+        append_record(&path, &sample_record(1750000001, "json-1", true)).unwrap();
+
+        let rec = load_spreads(&path, 10);
+        assert_eq!(rec.len(), 2);
+        assert_eq!(rec[0].spread_id, "json-1");
+        assert_eq!(rec[1].spread_id, "legacy-1");
+        assert_eq!(rec[1].canary, None);
+    }
+
+    #[test]
+    fn roster_record_shapes_the_audit_entry() {
+        let results = vec![
+            (
+                NodeConfig {
+                    name: "edge-1".to_string(),
+                    addr: "10.0.0.1:7711".to_string(),
+                },
+                Ok(()),
+            ),
+            (
+                NodeConfig {
+                    name: "edge-2".to_string(),
+                    addr: "10.0.0.2:7711".to_string(),
+                },
+                Err(anyhow::anyhow!("node 10.0.0.2:7711 failed to apply")),
+            ),
+        ];
+
+        let rec = roster_record("sid-1", Some("edge"), "webapp", "1.2.3", "cdcd", &results);
+        assert_eq!(rec.mode, SpreadMode::Roster);
+        assert_eq!(rec.stage, "full");
+        assert_eq!(rec.spread_id, "sid-1");
+        assert_eq!(rec.group.as_deref(), Some("edge"));
+        assert_eq!(rec.sha256, "cdcd");
+        assert!(rec.origin.is_none());
+        assert!(rec.canary.is_none());
+        assert!(rec.criteria.is_empty());
+        assert_eq!(rec.nodes.len(), 2);
+        assert_eq!(rec.nodes[0].name, "edge-1");
+        assert!(rec.nodes[0].ok);
+        assert!(rec.nodes[1].error.is_some());
+        assert_eq!(rec.applied, 1);
+        assert_eq!(rec.failed, 1);
+        assert!(!rec.ok, "a partial spread must not look like success");
+
+        // All nodes ok → ok, and an ad-hoc roster has no group.
+        let all_ok: Vec<(NodeConfig, Result<()>)> =
+            results.iter().map(|(n, _)| (n.clone(), Ok(()))).collect();
+        let rec2 = roster_record("sid-2", None, "webapp", "1.2.3", "cdcd", &all_ok);
+        assert!(rec2.ok);
+        assert_eq!(rec2.failed, 0);
+        assert!(rec2.group.is_none());
+
+        // An empty result set is not a success either.
+        let rec3 = roster_record("sid-3", None, "webapp", "1.2.3", "cdcd", &[]);
+        assert!(!rec3.ok);
+    }
+
+    #[test]
+    fn broadcast_node_results_maps_each_callback() {
+        let callbacks: Vec<(SocketAddr, Response)> = vec![
+            (
+                "10.0.0.2:53211".parse().unwrap(),
+                Response::success_with_data(serde_json::Value::Null),
+            ),
+            ("10.0.0.3:53212".parse().unwrap(), Response::error("boom")),
+            (
+                "10.0.0.4:53213".parse().unwrap(),
+                Response::not_found("missing"),
+            ),
+        ];
+
+        let nodes = broadcast_node_results(&callbacks);
+        assert_eq!(nodes.len(), 3);
+        assert!(nodes[0].ok);
+        assert!(nodes[0].error.is_none());
+        assert!(!nodes[1].ok);
+        assert_eq!(nodes[1].error.as_deref(), Some("boom"));
+        assert!(!nodes[2].ok);
+        assert_eq!(nodes[2].error.as_deref(), Some("missing"));
+        // The coordinator only knows the peer address on this path.
+        assert_eq!(nodes[1].name, "10.0.0.3:53212");
+        assert_eq!(nodes[1].addr, "10.0.0.3:53212");
     }
 
     #[test]

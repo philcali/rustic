@@ -60,12 +60,12 @@ struct GroupsFile {
 }
 
 /// The default groups file: `$XDG_CONFIG_HOME/pandemic/groups.toml`, else
-/// `~/.config/pandemic/groups.toml`.
+/// `~/.config/pandemic/groups.toml` (the XDG default for `$XDG_CONFIG_HOME`).
 pub fn default_groups_path() -> PathBuf {
     let base = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .filter(|p| p.is_absolute())
-        .or_else(home_dir)
+        .or_else(|| home_dir().map(|h| h.join(".config")))
         .unwrap_or_else(|| PathBuf::from("/etc/pandemic"));
     base.join("pandemic").join("groups.toml")
 }

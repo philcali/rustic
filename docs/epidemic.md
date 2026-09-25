@@ -217,7 +217,8 @@ pandemic-cli epidemic spread ./webapp/deployment.toml \
 pandemic-cli epidemic spread ./webapp/deployment.toml \
   --broadcast --interface 192.168.1.5 --criteria role=edge
 
-# Recent broadcast history (newest first); shows each spread_id for --promote.
+# Recent spread history (roster + broadcast, newest first); each spread_id
+# feeds --promote.
 pandemic-cli epidemic spreads
 pandemic-cli epidemic spreads --limit 5
 ```
@@ -360,6 +361,17 @@ prints one line per node:
 If **any** node fails, the command exits non-zero. A partial spread is
 reported as a failure — it is never silently treated as success.
 
+**Every spread is recorded** — roster and broadcast alike — as one JSON line
+in the spread history (`$XDG_STATE_HOME/pandemic/spread-history.log`, else
+`~/.local/state/pandemic/spread-history.log`). Each record carries the
+spread id, the mode (roster/broadcast) and stage (full/canary/promote), the
+plan's name + version + `sha256` (the plan hash), the target group (roster
+`--group`), the origin/criteria/canary (broadcast), and a **per-node
+result** — `name`, `addr`, `ok`, and the `error` for failed nodes.
+`epidemic spreads` lists the history newest-first with each node's ✓/✗ and
+error. The file is append-only JSONL; lines written by older releases (TSV)
+are still read back, so an existing history keeps working.
+
 ## How it fits together
 
 ```
@@ -428,8 +440,13 @@ The larger epidemic vision (discovery, multicast, reliability) is tracked in
 3. **Multicast + targeting + canary** — subnet-wide spread, criteria targeting,
    canary + promote — *done* (node joins the intent group;
    `epidemic spread --broadcast`; `epidemic spreads` history).
-4. **Reliability + hardening** — retries, sender-side audit, rate limiting,
-   per-node secrets, TLS, payload signing.
+4. **Reliability + hardening** — TLS on the coordinator→node hop and the
+   sender-side audit record are *done*; retries + idempotency, rate limiting,
+   per-node secrets/mTLS, and payload signing (the production gate) remain.
+5. **Observability** — the audit/record foundation (every spread records a
+   per-node outcome, readable via `epidemic spreads`) is *done*; a read-only
+   console surface (see the roster groups + spread history with each node's
+   outcome) and then trigger + live progress from the console remain.
 
 ## Known issues
 

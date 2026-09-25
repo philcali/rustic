@@ -533,15 +533,14 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let parent = tmp.path().parent().unwrap().to_path_buf();
 
-        match make_bundle("../evil", &[("payload", b"pwned")]) {
-            Ok(bytes) => match extract_bundle(&bytes, "../evil", tmp.path()) {
-                Ok(dir) => {
-                    // If it succeeded at all, the dir must still be under the root.
-                    assert!(dir.starts_with(tmp.path()), "extracted dir escaped root");
-                }
-                Err(_) => {} // the traversal guard rejected it — expected.
-            },
-            Err(_) => {} // the tar crate refused to build a `..` entry — also safe.
+        // Either failure mode is a pass (the tar crate refusing to build the
+        // `..` entry, or the traversal guard rejecting it). Only the success
+        // path needs an assertion:
+        if let Ok(bytes) = make_bundle("../evil", &[("payload", b"pwned")]) {
+            if let Ok(dir) = extract_bundle(&bytes, "../evil", tmp.path()) {
+                // If it succeeded at all, the dir must still be under the root.
+                assert!(dir.starts_with(tmp.path()), "extracted dir escaped root");
+            }
         }
 
         // In every case, nothing may have been written outside the root.
