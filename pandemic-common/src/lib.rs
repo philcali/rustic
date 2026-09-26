@@ -5,6 +5,7 @@ pub mod auth;
 pub mod client;
 pub mod discovery;
 pub mod groups;
+pub mod history;
 pub mod intent;
 pub mod multicast;
 pub mod registry;
@@ -28,6 +29,7 @@ pub use discovery::{advertise_node, discover_nodes, Advertiser, DiscoveredNode, 
 pub use groups::{
     default_groups_path, find_group, load_groups, load_groups_or_default, GroupConfig, NodeConfig,
 };
+pub use history::{append_record, default_history_path, load_spreads};
 pub use intent::{
     cohort_bucket, generate_spread_id, in_canary_cohort, intent_is_fresh, intent_token,
     needs_capabilities, parse_criteria, verify_intent_token, Criterion, NodeIdentity,

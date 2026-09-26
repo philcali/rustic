@@ -719,3 +719,120 @@ section h3 {
 .plan-diff-row {
   margin-bottom: 0.2rem;
 }
+
+/* ── Epidemic (increment 5b): roster groups + spread history ─────────── */
+
+.epidemic-section {
+  margin: 2rem 0;
+}
+
+.epidemic-panel {
+  margin-bottom: 1.5rem;
+}
+
+.epidemic-panel h3 {
+  margin: 0 0 0.75rem 0;
+  font-size: 1rem;
+  color: var(--text-muted);
+}
+
+.epidemic-hint {
+  font-size: 0.8rem;
+  font-weight: 400;
+  color: var(--text-muted);
+}
+
+.epidemic-group,
+.epidemic-spread {
+  padding: 1rem;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.epidemic-spread.ok {
+  border-left: 3px solid var(--success-color);
+}
+
+.epidemic-spread.fail {
+  border-left: 3px solid var(--danger-color);
+}
+
+.epidemic-info {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.epidemic-info strong {
+  color: var(--text-color);
+}
+
+.epidemic-meta {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  margin-bottom: 0.5rem;
+  word-break: break-word;
+}
+
+.epidemic-time {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  margin-left: auto;
+}
+
+.epidemic-sha {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  background: rgba(255, 255, 255, 0.1);
+  padding: 0.15rem 0.4rem;
+  border-radius: 4px;
+  cursor: help;
+}
+
+.epidemic-nodes,
+.epidemic-spread-nodes {
+  margin: 0.25rem 0 0 0;
+  padding-left: 1.25rem;
+  font-size: 0.85rem;
+}
+
+.epidemic-spread-nodes {
+  padding-left: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.epidemic-node {
+  font-size: 0.85rem;
+}
+
+.epidemic-node.ok .mark {
+  color: var(--success-color);
+  font-weight: 700;
+}
+
+.epidemic-node.fail .mark {
+  color: var(--danger-color);
+  font-weight: 700;
+}
+
+.epidemic-addr {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+}
+
+.epidemic-error {
+  color: var(--danger-color);
+  font-size: 0.8rem;
+  word-break: break-word;
+}
+
+.epidemic-muted {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  font-style: italic;
+}

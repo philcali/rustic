@@ -24,10 +24,10 @@ use events::publish_event;
 use handlers::{
     add_user_to_group, control_system_service, create_group, create_user, delete_group,
     delete_user, deregister_plugin, find_infections, get_admin_capabilities, get_audit,
-    get_deployment, get_health, get_infection_manifest, get_plugin, get_service_config,
-    get_system_service, install_deployment, install_infection, list_deployments, list_groups,
-    list_plugins, list_system_services, list_users, modify_user, remove_deployment,
-    remove_user_from_group, reset_service_config, set_service_config, AppState,
+    get_deployment, get_epidemic_groups, get_epidemic_spreads, get_health, get_infection_manifest,
+    get_plugin, get_service_config, get_system_service, install_deployment, install_infection,
+    list_deployments, list_groups, list_plugins, list_system_services, list_users, modify_user,
+    remove_deployment, remove_user_from_group, reset_service_config, set_service_config, AppState,
 };
 use middleware::auth_middleware;
 use std::sync::{Arc, Mutex};
@@ -182,6 +182,9 @@ async fn main() -> Result<()> {
         )
         // Audit log (phase 8): what the agent applied / removed, step by step
         .route("/api/admin/audit", get(get_audit))
+        // Epidemic read surface (5b): roster groups + spread history
+        .route("/api/epidemic/spreads", get(get_epidemic_spreads))
+        .route("/api/epidemic/groups", get(get_epidemic_groups))
         .layer(from_fn_with_state(state.clone(), auth_middleware));
 
     // WebSocket route handles auth internally
@@ -234,7 +237,7 @@ roles = ["reader"]
 scopes = ["*"]
 
 [roles.reader]
-scopes = ["plugins:read", "health:read", "events:subscribe"]
+scopes = ["plugins:read", "health:read", "events:subscribe", "epidemic:read"]
 "#,
         admin_key, reader_key
     );

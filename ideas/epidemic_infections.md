@@ -55,7 +55,7 @@ Epidemic infections enable configuration and updates to "spread" across pandemic
 | 2 | Discovery (mDNS/Bonjour) — roster discovery | Level 1 | **done** |
 | 3 | Multicast + targeting + canary | Level 2 | **done** |
 | 4 | Reliability + hardening (retries, audit, rate-limit, per-node secrets, TLS, signing) | Level 3 + Phase 4 | **in progress** — 4a TLS done; sender-side audit done (shipped as 5a); retries/idempotency, rate-limit, payload signing, per-node secrets/mTLS remaining |
-| 5 | Epidemic observability (console / UI to see + manage the spread) | Cross-cutting (all levels) | **in progress** — 5a audit/record foundation **done**; 5b read-only console, 5c trigger + live progress remaining |
+| 5 | Epidemic observability (console / UI to see + manage the spread) | Cross-cutting (all levels) | **in progress** — 5a audit/record foundation **done**, 5b read-only console **done**; 5c trigger + live progress remaining |
 
 #### Increment 1 — Node / group / coordinator + reliable TCP spread — **done**
 
@@ -254,11 +254,28 @@ events it produced — so **"see the spread" is the honest first slice**, ahead 
     groups.toml`, honoring `$XDG_CONFIG_HOME`). Now matches the XDG default;
     verified in the e2e container (a group written to the documented path is
     found by `epidemic nodes` / `spread --group`).
-- **5b — read-only "see the spread."** REST: `GET /api/epidemic/spreads?limit=N`
-  (history, newest first, per-node detail) and `GET /api/epidemic/groups`
-  (roster groups + nodes from `groups.toml`). Console: a new **Epidemic** tab —
-  the roster groups, and a spread-history table with per-node ✓/✗, the error, and
-  the plan hash.
+- **5b — read-only "see the spread." — done.** REST: `GET /api/epidemic/spreads?limit=N`
+  (default 50, capped at 1000; history newest-first with per-node detail,
+  including legacy TSV lines) and `GET /api/epidemic/groups` (roster groups +
+  nodes from `groups.toml`), both behind a new `epidemic:read` scope (added to
+  the default reader role; admin `*` already covers it). Console: a new top-level
+  **Epidemic** section (deliberately distinct from the IAM "Groups" tab) —
+  roster-group cards (name, node count, secret path, node list) and
+  spread-history cards with per-node ✓/✗ + error, group/origin/criteria/canary,
+  and the plan hash. The shared history logic (path resolution + JSONL/legacy-TSV
+  parsing + append) moved from the CLI into **`pandemic-common::history`** so
+  the CLI and REST can never diverge — `epidemic spreads` now reads through the
+  same module (verified: identical output on the same file).
+  - **Acceptance (met):** with seeded fixtures (1 legacy TSV line + 2 JSON
+    records; groups `edge` + `lab`), the admin key got 200 on both endpoints:
+    spreads newest-first (broadcast with `origin`/`criteria`, roster with
+    `group` + per-node ✓/✗ + "connection refused", legacy TSV mapped to
+    `mode=broadcast` with `canary pct=25` and no per-node detail), groups with
+    rosters + secret path; a key *without* `epidemic:read` got 403; no key got
+    401. CLI `epidemic spreads` rendered the identical three records.
+  - **Gate green:** build + clippy (`-D warnings`) + fmt + test all pass across
+    the workspace. New tests: `history_path_honors_xdg_state_home` (common),
+    `spreads_query_defaults_limit_and_caps_it` (rest).
 - **5c — manage the spread (later).** Trigger a spread from the console
   (`POST /api/epidemic/spread`) and stream live progress over the existing
   `/api/events/stream` websocket.
@@ -270,17 +287,18 @@ events it produced — so **"see the spread" is the honest first slice**, ahead 
 
 ### Resume point
 
-- **Next up: 5b — read-only "see the spread" (the console / UI).** The 5a
-  record foundation is done and committed: both spread paths write a JSONL
-  `SpreadRecord` (per-node detail, group, plan hash), readable by
-  `epidemic spreads` and ready for the console. 5b adds the REST read surface
-  (`GET /api/epidemic/spreads`, `GET /api/epidemic/groups` in `pandemic-rest`)
-  and the **Epidemic** tab in `pandemic-console/web/src/` (distinct from the
-  IAM "Groups" tab). Then 5c (trigger + live progress). The rest of
-  Increment 4 (per-node secrets / mTLS identity, retries + idempotency, rate
-  limiting, and **payload signing** — the production gate, shared with the
-  registry) stays open and is independent of 5b–5c. See the Increment 5 section
-  for scope and acceptance.
+- **Next up: 5c — manage the spread (trigger + live progress).** 5b is done
+  and committed: the REST read surface (`GET /api/epidemic/spreads`,
+  `GET /api/epidemic/groups`, scope `epidemic:read`) and the console's
+  **Epidemic** section show roster groups + the full spread history; the shared
+  history code now lives in `pandemic-common::history` (used by CLI and REST
+  alike, write-side included, so 5c can append from a future trigger path).
+  5c adds `POST /api/epidemic/spread` (trigger a spread from the console) and
+  streams live progress over the existing `/api/events/stream` websocket. The
+  rest of Increment 4 (per-node secrets / mTLS identity, retries +
+  idempotency, rate limiting, and **payload signing** — the production gate,
+  shared with the registry) stays open and is independent of 5c. See the
+  Increment 5 section for scope and acceptance.
 - **The gate to pass before an increment counts as done** (mirrors CI):
   `cargo build --workspace` && `cargo clippy --workspace -- -D warnings` &&
   `cargo fmt --check` && `cargo test --workspace`.
@@ -324,14 +342,21 @@ events it produced — so **"see the spread" is the honest first slice**, ahead 
     `SpreadIntent`, **and** (5a) the shared spread-history types `SpreadRecord`,
     `SpreadMode`, `SpreadNodeResult` — in protocol (not the CLI) so 5b's REST
     reads the exact same wire shape.
-  - **Increment 5 — 5a done, 5b/5c not yet built.** 5a's data model:
-    `pandemic-cli/src/epidemic.rs` (roster + broadcast both build a
-    `SpreadRecord` via `roster_record`/`broadcast_node_results`; `append_record`
-    writes JSONL; `load_spreads` reads JSONL + legacy TSV) and the types above.
-    5b/5c still to build: the read surface in `pandemic-rest/src/main.rs`
-    (`GET /api/epidemic/spreads`, `GET /api/epidemic/groups`, and later
-    `POST /api/epidemic/spread`); the UI in `pandemic-console/web/src/` (a new
-    **Epidemic** tab, distinct from the IAM "Groups" tab).
+  - `pandemic-common/src/history.rs` — shared spread-history file logic:
+    `default_history_path` (XDG_STATE_HOME → `~/.local/state` → `/etc/pandemic`),
+    `append_record` (JSONL write), `load_spreads` (JSONL + legacy TSV,
+    newest-first, limit). Used by **both** the CLI and REST — one source of
+    truth, so `epidemic spreads` and the console can never disagree.
+  - **Increment 5 — 5a + 5b done, 5c not yet built.** 5a's data model: the
+    types above; `pandemic-cli/src/epidemic.rs` (roster + broadcast both build
+    a `SpreadRecord` via `roster_record`/`broadcast_node_results`); history I/O
+    in `pandemic-common::history`. 5b's read surface:
+    `pandemic-rest/src/handlers.rs` (`get_epidemic_spreads` /
+    `get_epidemic_groups`, scope `epidemic:read`; routes registered in
+    `pandemic-rest/src/main.rs`) and `pandemic-console/web/src/epidemic.js`
+    (the **Epidemic** section, distinct from the IAM "Groups" tab).
+    5c still to build: `POST /api/epidemic/spread` (trigger) + live progress
+    over the existing `/api/events/stream` websocket.
   - How-to: `docs/epidemic.md`; operator loop: `e2e/README.md` (epidemic section).
 
 ---

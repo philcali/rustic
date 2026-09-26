@@ -6,6 +6,7 @@ import { loadPlugins } from './plugins.js'
 import { loadServices, toggleServiceConfig, showServiceConfig, resetServiceConfig, controlService } from './services.js'
 import { loadUsers, deleteUser } from './users.js'
 import { loadGroups, deleteGroup } from './groups.js'
+import { loadEpidemic } from './epidemic.js'
 import { searchInfections, viewInfectionManifest, installInfection } from './registry.js'
 import {
     listDeployments, viewDeployment, removeDeployment,
@@ -30,6 +31,7 @@ class PandemicConsole {
         this.loadHealth();
         this.setupWebSocket();
         this.loadPlugins();
+        this.loadEpidemic();
         this.loadServices();
     }
 
@@ -56,6 +58,22 @@ class PandemicConsole {
                         <h2>Registered Plugins</h2>
                         <div id="plugins-list" class="list-container">
                             <div class="loading">Loading plugins...</div>
+                        </div>
+                    </section>
+
+                    <section class="epidemic-section">
+                        <h2>🦠 Epidemic</h2>
+                        <div class="epidemic-panel">
+                            <h3>Roster groups</h3>
+                            <div id="epidemic-groups" class="list-container">
+                                <div class="loading">Loading roster groups...</div>
+                            </div>
+                        </div>
+                        <div class="epidemic-panel">
+                            <h3>Spread history <span class="epidemic-hint">(newest first)</span></h3>
+                            <div id="epidemic-spreads" class="list-container">
+                                <div class="loading">Loading spread history...</div>
+                            </div>
                         </div>
                     </section>
 
@@ -147,6 +165,7 @@ class PandemicConsole {
             localStorage.setItem('pandemic-api-key', this.apiKey);
             this.loadHealth();
             this.loadPlugins();
+            this.loadEpidemic();
             this.checkAgentCapabilities();
             this.setupWebSocket();
         });
@@ -285,6 +304,10 @@ class PandemicConsole {
 
     async loadPlugins() {
         await loadPlugins(this.apiBase, this.apiKey);
+    }
+
+    async loadEpidemic() {
+        await loadEpidemic(this.apiBase, this.apiKey);
     }
 
     async loadServices() {

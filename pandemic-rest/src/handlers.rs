@@ -517,6 +517,88 @@ pub async fn get_audit(
     }
 }
 
+// ── Epidemic read surface (increment 5b): "see the spread" ────────────────
+//
+// Read-only views of the coordinator's on-disk state: the spread history
+// (`~/.local/state/pandemic/spread-history.log`, written by `epidemic
+// spread`) and the roster groups (`~/.config/pandemic/groups.toml`). Both
+// are shared `pandemic-common` readers, so the console shows exactly what
+// `epidemic spreads` / `epidemic nodes` show.
+
+#[derive(Deserialize)]
+pub struct EpidemicSpreadsQuery {
+    /// How many most recent spreads to return (newest first).
+    #[serde(default = "default_epidemic_spread_limit")]
+    pub limit: usize,
+}
+
+fn default_epidemic_spread_limit() -> usize {
+    50
+}
+
+/// Upper bound for `?limit=` so a typo (or a hostile client) can't ask for
+/// the whole history in one response.
+const EPIDEMIC_SPREAD_LIMIT_CAP: usize = 1000;
+
+/// `GET /api/epidemic/spreads?limit=N` — recent spread history, newest
+/// first. Each record is the shared `SpreadRecord` (5a shape): plan
+/// identity + hash, targeting, and the per-node ✓/✗ outcomes. A missing
+/// history file is an empty list, not an error.
+pub async fn get_epidemic_spreads(
+    State(state): State<AppState>,
+    Extension(scopes): Extension<Vec<String>>,
+    Query(params): Query<EpidemicSpreadsQuery>,
+) -> ApiResult {
+    require_scope!(&state.auth_config, &scopes, "epidemic:read");
+
+    let path = pandemic_common::default_history_path();
+    let records = pandemic_common::load_spreads(&path, params.limit.min(EPIDEMIC_SPREAD_LIMIT_CAP));
+    match serde_json::to_value(&records) {
+        Ok(spreads) => Ok(Json(json!({
+            "status": "success",
+            "data": { "spreads": spreads, "count": records.len(), "path": path.to_string_lossy() }
+        }))),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"status": "error", "message": e.to_string()})),
+        )),
+    }
+}
+
+/// `GET /api/epidemic/groups` — the roster groups and their nodes, from
+/// `groups.toml`. A missing file means "no named groups" (an empty list).
+pub async fn get_epidemic_groups(
+    State(state): State<AppState>,
+    Extension(scopes): Extension<Vec<String>>,
+) -> ApiResult {
+    require_scope!(&state.auth_config, &scopes, "epidemic:read");
+
+    let path = pandemic_common::default_groups_path();
+    let groups = match pandemic_common::load_groups(&path) {
+        Ok(groups) => groups,
+        Err(e) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"status": "error", "message": e.to_string()})),
+            ))
+        }
+    };
+    Ok(Json(json!({
+        "status": "success",
+        "data": {
+            "groups": groups.iter().map(|g| {
+                json!({
+                    "name": g.name,
+                    "secret_path": g.secret_path,
+                    "nodes": g.node.iter().map(|n| json!({ "name": n.name, "addr": n.addr })).collect::<Vec<_>>()
+                })
+            }).collect::<Vec<_>>(),
+            "count": groups.len(),
+            "path": path.to_string_lossy()
+        }
+    })))
+}
+
 #[derive(Deserialize)]
 pub struct DeploymentInstallPayload {
     /// Registry deployment name (by-name install; its infection-spec atoms are
@@ -675,5 +757,27 @@ mod merge_diff_tests {
         let mut data = json!({ "infections": "scalar" });
         merge_diff_into_preview(&mut data, &json!({ "infections": [] }));
         assert_eq!(data["infections"], "scalar");
+    }
+}
+
+#[cfg(test)]
+mod epidemic_tests {
+    use super::*;
+
+    #[test]
+    fn spreads_query_defaults_limit_and_caps_it() {
+        let q: EpidemicSpreadsQuery = serde_json::from_str("{}").unwrap();
+        assert_eq!(q.limit, 50);
+
+        let q: EpidemicSpreadsQuery = serde_json::from_str(r#"{"limit": 7}"#).unwrap();
+        assert_eq!(q.limit, 7);
+        assert_eq!(q.limit.min(EPIDEMIC_SPREAD_LIMIT_CAP), 7);
+
+        // A huge limit is capped, not honored verbatim.
+        let q: EpidemicSpreadsQuery = serde_json::from_str(r#"{"limit": 999999}"#).unwrap();
+        assert_eq!(
+            q.limit.min(EPIDEMIC_SPREAD_LIMIT_CAP),
+            EPIDEMIC_SPREAD_LIMIT_CAP
+        );
     }
 }

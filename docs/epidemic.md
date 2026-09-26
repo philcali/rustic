@@ -372,6 +372,23 @@ result** — `name`, `addr`, `ok`, and the `error` for failed nodes.
 error. The file is append-only JSONL; lines written by older releases (TSV)
 are still read back, so an existing history keeps working.
 
+### Reading it in the console
+
+The same history and the roster groups are exposed read-only through
+`pandemic-rest` (both require the `epidemic:read` scope, included in the
+default reader role) and shown in the web console's **Epidemic** section —
+deliberately distinct from the IAM "Groups" tab, which lists *user* groups:
+
+- `GET /api/epidemic/spreads?limit=N` — spread history, newest first (default
+  50, capped at 1000), with each record's mode, stage, name/version/plan hash,
+  group/origin/criteria/canary, and the per-node ✓/✗ + error.
+- `GET /api/epidemic/groups` — the roster groups from `groups.toml`: name,
+  nodes, and the group's secret path.
+
+The console and the CLI read through one shared module
+(`pandemic_common::history`), so `epidemic spreads` and the console can never
+disagree. Triggering a spread from the console is planned next (increment 5c).
+
 ## How it fits together
 
 ```
@@ -444,9 +461,11 @@ The larger epidemic vision (discovery, multicast, reliability) is tracked in
    sender-side audit record are *done*; retries + idempotency, rate limiting,
    per-node secrets/mTLS, and payload signing (the production gate) remain.
 5. **Observability** — the audit/record foundation (every spread records a
-   per-node outcome, readable via `epidemic spreads`) is *done*; a read-only
-   console surface (see the roster groups + spread history with each node's
-   outcome) and then trigger + live progress from the console remain.
+   per-node outcome, readable via `epidemic spreads`) is *done*; the read-only
+   console surface is *done* (REST `GET /api/epidemic/spreads` +
+   `GET /api/epidemic/groups`; the console's **Epidemic** section shows the
+   roster groups and the spread history with each node's outcome and error);
+   trigger + live progress from the console remain.
 
 ## Known issues
 
