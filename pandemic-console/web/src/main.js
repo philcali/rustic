@@ -6,7 +6,7 @@ import { loadPlugins } from './plugins.js'
 import { loadServices, toggleServiceConfig, showServiceConfig, resetServiceConfig, controlService } from './services.js'
 import { loadUsers, deleteUser } from './users.js'
 import { loadGroups, deleteGroup } from './groups.js'
-import { loadEpidemic } from './epidemic.js'
+import { loadEpidemic, handleEpidemicProgress } from './epidemic.js'
 import { searchInfections, viewInfectionManifest, installInfection } from './registry.js'
 import {
     listDeployments, viewDeployment, removeDeployment,
@@ -74,6 +74,13 @@ class PandemicConsole {
                             <div id="epidemic-spreads" class="list-container">
                                 <div class="loading">Loading spread history...</div>
                             </div>
+                        </div>
+                        <div class="epidemic-panel">
+                            <h3>Start a spread <span class="epidemic-hint">(coordinator runs it; progress is live)</span></h3>
+                            <div id="epidemic-trigger" class="epidemic-trigger">
+                                <div class="loading">Loading trigger form...</div>
+                            </div>
+                            <div id="epidemic-progress" class="epidemic-progress"></div>
                         </div>
                     </section>
 
@@ -267,8 +274,12 @@ class PandemicConsole {
         };
     }
 
-    handleRealtimeEvent(event) {
-        // Handle different event types for real-time updates
+    handleRealtimeEvent(envelope) {
+        // WebSocket events arrive as {"type":"event","data":{topic, data}} —
+        // unwrap the envelope (tolerate a bare event for direct calls).
+        const event = envelope?.data ?? envelope;
+        if (!event || !event.topic) return;
+
         switch (event.topic) {
             case 'plugin.registered':
             case 'plugin.deregistered':
@@ -279,6 +290,11 @@ class PandemicConsole {
                 break;
             case 'service.status_changed':
                 this.loadServices();
+                break;
+            case 'epidemic.spread':
+                // Live spread progress (increment 5c): the payload's
+                // spread_progress event drives the Epidemic live panel.
+                handleEpidemicProgress(event.data, () => this.loadEpidemic());
                 break;
         }
     }

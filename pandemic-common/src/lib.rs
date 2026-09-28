@@ -3,6 +3,7 @@ pub mod apply;
 pub mod audit;
 pub mod auth;
 pub mod client;
+pub mod coordinator;
 pub mod discovery;
 pub mod groups;
 pub mod history;
@@ -25,6 +26,12 @@ pub use apply::{
 };
 pub use auth::{generate_nonce, generate_secret, sign, verify, EPIDEMIC_SECRET_PATH};
 pub use client::{DaemonClient, PersistentClient};
+pub use coordinator::{
+    apply_to_node, broadcast_node_results, build_intent, host_of, merge_discovered, now_unix_secs,
+    parse_canary_arg, primary_lan_ip, resolve_epidemic_secret, resolve_roster, roster_node_results,
+    roster_record, run_broadcast_spread, run_roster_spread, serve_one_callback, validate_broadcast,
+    BroadcastSpread, ResolvedSecret, RosterSpread, SecretSource, SpreadResult, TlsOptions,
+};
 pub use discovery::{advertise_node, discover_nodes, Advertiser, DiscoveredNode, SERVICE_FQDN};
 pub use groups::{
     default_groups_path, find_group, load_groups, load_groups_or_default, GroupConfig, NodeConfig,

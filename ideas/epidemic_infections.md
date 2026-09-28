@@ -55,7 +55,7 @@ Epidemic infections enable configuration and updates to "spread" across pandemic
 | 2 | Discovery (mDNS/Bonjour) — roster discovery | Level 1 | **done** |
 | 3 | Multicast + targeting + canary | Level 2 | **done** |
 | 4 | Reliability + hardening (retries, audit, rate-limit, per-node secrets, TLS, signing) | Level 3 + Phase 4 | **in progress** — 4a TLS done; sender-side audit done (shipped as 5a); retries/idempotency, rate-limit, payload signing, per-node secrets/mTLS remaining |
-| 5 | Epidemic observability (console / UI to see + manage the spread) | Cross-cutting (all levels) | **in progress** — 5a audit/record foundation **done**, 5b read-only console **done**; 5c trigger + live progress remaining |
+| 5 | Epidemic observability (console / UI to see + manage the spread) | Cross-cutting (all levels) | **done** — 5a audit/record foundation, 5b read-only console, 5c console trigger + live progress all shipped |
 
 #### Increment 1 — Node / group / coordinator + reliable TCP spread — **done**
 
@@ -276,9 +276,27 @@ events it produced — so **"see the spread" is the honest first slice**, ahead 
   - **Gate green:** build + clippy (`-D warnings`) + fmt + test all pass across
     the workspace. New tests: `history_path_honors_xdg_state_home` (common),
     `spreads_query_defaults_limit_and_caps_it` (rest).
-- **5c — manage the spread (later).** Trigger a spread from the console
-  (`POST /api/epidemic/spread`) and stream live progress over the existing
-  `/api/events/stream` websocket.
+- **5c — manage the spread. — done.** `POST /api/epidemic/spread` (scope
+  `epidemic:spread`; admin `*` only, not the default reader role) triggers a
+  roster spread (`path`/`name` plan + `group`/`nodes` roster + `secret`/
+  `secret_path` + TLS options) or a broadcast spread (`broadcast: true` +
+  `criteria`/`canary`/`promote`/`spread_id` + multicast options) — the exact
+  same `pandemic_common::coordinator` entry points the CLI uses, so the two
+  surfaces cannot diverge. Live progress: the handler threads a
+  `progress_forwarder` mpsc channel into the runner; each `SpreadProgress`
+  event (`started` / `node` / `finished`) is published to the daemon event
+  bus on topic `epidemic.spread`, which `/api/events/stream` delivers to the
+  console, where the Epidemic section renders a live per-node ✓/✗ panel and
+  refreshes the history on `finished`. New tests:
+  `spread_payload_defaults_for_a_minimal_roster_trigger` +
+  `spread_payload_parses_full_broadcast_options` (rest). **Docker E2E**
+  (`pandemic-systemd:latest`, privileged + systemd, real
+  `pandemic`/`pandemic-node`/`pandemic-agent`): a roster POST applied the
+  fixture through node→agent→systemd (unit installed + enabled, health
+  checked) with `started`/`node`/`finished` events on the websocket; a
+  broadcast POST with `criteria: ["role=canary"]` self-selected the
+  multicast node and applied; reader key got 403; CLI and REST spread
+  results agree; `GET /api/epidemic/spreads` shows every record.
 
 - **Acceptance:** the operator opens the console and sees the roster groups plus a
   history of spreads with each node's outcome and error (roster *and* broadcast
@@ -287,18 +305,16 @@ events it produced — so **"see the spread" is the honest first slice**, ahead 
 
 ### Resume point
 
-- **Next up: 5c — manage the spread (trigger + live progress).** 5b is done
-  and committed: the REST read surface (`GET /api/epidemic/spreads`,
-  `GET /api/epidemic/groups`, scope `epidemic:read`) and the console's
-  **Epidemic** section show roster groups + the full spread history; the shared
-  history code now lives in `pandemic-common::history` (used by CLI and REST
-  alike, write-side included, so 5c can append from a future trigger path).
-  5c adds `POST /api/epidemic/spread` (trigger a spread from the console) and
-  streams live progress over the existing `/api/events/stream` websocket. The
-  rest of Increment 4 (per-node secrets / mTLS identity, retries +
-  idempotency, rate limiting, and **payload signing** — the production gate,
-  shared with the registry) stays open and is independent of 5c. See the
-  Increment 5 section for scope and acceptance.
+- **5c is done and committed — Increment 5 is complete.** 5a (audit record),
+  5b (read surface: `GET /api/epidemic/spreads`, `GET /api/epidemic/groups`,
+  scope `epidemic:read`, the console's **Epidemic** section), and 5c (trigger:
+  `POST /api/epidemic/spread`, scope `epidemic:spread`, live progress over
+  `/api/events/stream`) are all in. The shared code — coordinator logic in
+  `pandemic-common::coordinator`, history in `pandemic-common::history`,
+  types in `pandemic-protocol` — is used by CLI and REST alike, read- and
+  write-side. **Next up: the rest of Increment 4** — per-node secrets /
+  mTLS identity, retries + idempotency, rate limiting, and **payload
+  signing** (the production gate, shared with the registry).
 - **The gate to pass before an increment counts as done** (mirrors CI):
   `cargo build --workspace` && `cargo clippy --workspace -- -D warnings` &&
   `cargo fmt --check` && `cargo test --workspace`.
@@ -347,7 +363,7 @@ events it produced — so **"see the spread" is the honest first slice**, ahead 
     `append_record` (JSONL write), `load_spreads` (JSONL + legacy TSV,
     newest-first, limit). Used by **both** the CLI and REST — one source of
     truth, so `epidemic spreads` and the console can never disagree.
-  - **Increment 5 — 5a + 5b done, 5c not yet built.** 5a's data model: the
+  - **Increment 5 — done (5a + 5b + 5c).** 5a's data model: the
     types above; `pandemic-cli/src/epidemic.rs` (roster + broadcast both build
     a `SpreadRecord` via `roster_record`/`broadcast_node_results`); history I/O
     in `pandemic-common::history`. 5b's read surface:
@@ -355,8 +371,14 @@ events it produced — so **"see the spread" is the honest first slice**, ahead 
     `get_epidemic_groups`, scope `epidemic:read`; routes registered in
     `pandemic-rest/src/main.rs`) and `pandemic-console/web/src/epidemic.js`
     (the **Epidemic** section, distinct from the IAM "Groups" tab).
-    5c still to build: `POST /api/epidemic/spread` (trigger) + live progress
-    over the existing `/api/events/stream` websocket.
+    5c's write surface: `pandemic-rest/src/handlers.rs` (`trigger_spread` +
+    `progress_forwarder`, scope `epidemic:spread`, `POST /api/epidemic/spread`
+    in `main.rs`) reusing `pandemic-common::coordinator::run_roster_spread` /
+    `run_broadcast_spread` with a progress channel;
+    `pandemic-protocol` `SpreadProgress` (started/node/finished, published on
+    topic `epidemic.spread`); console: `epidemic.js` `renderEpidemicTrigger`
+    (the "Start a spread" form) + `handleEpidemicProgress` (the live panel)
+    driven by the `/api/events/stream` `epidemic.spread` case in `main.js`.
   - How-to: `docs/epidemic.md`; operator loop: `e2e/README.md` (epidemic section).
 
 ---

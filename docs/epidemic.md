@@ -387,7 +387,32 @@ deliberately distinct from the IAM "Groups" tab, which lists *user* groups:
 
 The console and the CLI read through one shared module
 (`pandemic_common::history`), so `epidemic spreads` and the console can never
-disagree. Triggering a spread from the console is planned next (increment 5c).
+disagree.
+
+### Triggering a spread from the console
+
+The console's **Epidemic** section also has a **Start a spread** panel that
+calls `POST /api/epidemic/spread` (requires the `epidemic:spread` scope —
+admin only, *not* in the default reader role). It takes the same inputs as
+the CLI and runs the *same* coordinator code path, so a console-triggered
+spread is indistinguishable from a CLI one:
+
+- **Deployment** — a registry `name` (with optional `vars`) or a local
+  `path` to `deployment.toml`.
+- **Roster mode** — a named `group` from `groups.toml` and/or ad-hoc
+  `nodes` (`host:port`), plus the epidemic `secret` (or `secret_path`) and
+  the TLS options for the coordinator→node hop.
+- **Broadcast mode** — `broadcast` + `criteria` (`KEY=VALUE`, AND), optional
+  `canary` (`25` or `KEY=VALUE`), `promote` + `spread_id` to roll out a
+  prior canary, and the multicast group/port + `wait`.
+
+While the spread runs, the REST server forwards each progress event
+(`started`, per-node `node` result, `finished`) to the daemon event bus on
+topic `epidemic.spread`; the already-open `/api/events/stream` websocket
+delivers it to the console, which renders a live per-node ✓/✗ panel and
+refreshes the history when the spread finishes. The final `SpreadRecord` is
+in the POST response too, so a non-browser client gets the full result in
+one call.
 
 ## How it fits together
 
@@ -460,12 +485,14 @@ The larger epidemic vision (discovery, multicast, reliability) is tracked in
 4. **Reliability + hardening** — TLS on the coordinator→node hop and the
    sender-side audit record are *done*; retries + idempotency, rate limiting,
    per-node secrets/mTLS, and payload signing (the production gate) remain.
-5. **Observability** — the audit/record foundation (every spread records a
-   per-node outcome, readable via `epidemic spreads`) is *done*; the read-only
-   console surface is *done* (REST `GET /api/epidemic/spreads` +
+5. **Observability** — *done.* The audit/record foundation (every spread
+   records a per-node outcome, readable via `epidemic spreads`), the
+   read-only console surface (REST `GET /api/epidemic/spreads` +
    `GET /api/epidemic/groups`; the console's **Epidemic** section shows the
-   roster groups and the spread history with each node's outcome and error);
-   trigger + live progress from the console remain.
+   roster groups and the spread history with each node's outcome and error),
+   and the console trigger (`POST /api/epidemic/spread` behind the
+   `epidemic:spread` scope) with live per-node progress streamed over
+   `/api/events/stream`.
 
 ## Known issues
 

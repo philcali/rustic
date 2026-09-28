@@ -27,7 +27,8 @@ use handlers::{
     get_deployment, get_epidemic_groups, get_epidemic_spreads, get_health, get_infection_manifest,
     get_plugin, get_service_config, get_system_service, install_deployment, install_infection,
     list_deployments, list_groups, list_plugins, list_system_services, list_users, modify_user,
-    remove_deployment, remove_user_from_group, reset_service_config, set_service_config, AppState,
+    remove_deployment, remove_user_from_group, reset_service_config, set_service_config,
+    trigger_spread, AppState,
 };
 use middleware::auth_middleware;
 use std::sync::{Arc, Mutex};
@@ -182,9 +183,10 @@ async fn main() -> Result<()> {
         )
         // Audit log (phase 8): what the agent applied / removed, step by step
         .route("/api/admin/audit", get(get_audit))
-        // Epidemic read surface (5b): roster groups + spread history
+        // Epidemic read surface (5b) + trigger (5c): groups, history, spread
         .route("/api/epidemic/spreads", get(get_epidemic_spreads))
         .route("/api/epidemic/groups", get(get_epidemic_groups))
+        .route("/api/epidemic/spread", post(trigger_spread))
         .layer(from_fn_with_state(state.clone(), auth_middleware));
 
     // WebSocket route handles auth internally

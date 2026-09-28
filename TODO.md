@@ -16,10 +16,13 @@ Planned improvements for the Pandemic codebase.
   still readable)** and **5b (the console read surface: REST
   `GET /api/epidemic/spreads` + `GET /api/epidemic/groups` behind an
   `epidemic:read` scope, plus a new **Epidemic** section in the web console
-  showing roster groups and the spread history with per-node ✓/✗)**. Still
-  open: the rest of Increment 4 (retries + idempotency, rate limiting, payload
-  signing, per-node secrets/mTLS) and 5c (trigger a spread from the console +
-  live progress). The codified, cross-session build plan
+  showing roster groups and the spread history with per-node ✓/✗**), and
+  **5c (the console write surface: REST `POST /api/epidemic/spread` behind an
+  `epidemic:spread` scope triggers a roster *or* broadcast spread and streams
+  live per-node progress over the existing `/api/events/stream` websocket,
+  which the console's Epidemic section renders as it lands)**. Still open: the
+  rest of Increment 4 (retries + idempotency, rate limiting, payload signing,
+  per-node secrets/mTLS). The codified, cross-session build plan
   — fixed decisions, increment status, resume point, and code map — lives in
   [`ideas/epidemic_infections.md`](ideas/epidemic_infections.md).
   Operator how-to: [`docs/epidemic.md`](docs/epidemic.md).

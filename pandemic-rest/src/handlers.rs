@@ -599,6 +599,266 @@ pub async fn get_epidemic_groups(
     })))
 }
 
+// ── Epidemic trigger (increment 5c): "start the spread" ─────────────────
+//
+// `POST /api/epidemic/spread` runs the exact same shared coordinator that
+// `epidemic spread` does (`pandemic_common::run_roster_spread` /
+// `run_broadcast_spread`), so CLI and console cannot diverge. Live progress
+// is published to the daemon event bus on topic `epidemic.spread`, which the
+// websocket (`/api/events/stream`) forwards to any subscribed console.
+
+use std::net::Ipv4Addr;
+
+#[derive(Deserialize)]
+pub struct EpidemicSpreadPayload {
+    /// Registry deployment name (exactly one of `name` or `path` required).
+    #[serde(default)]
+    name: Option<String>,
+    /// Path to a local deployment spec (`deployment.toml`). Exactly one of
+    /// `name` or `path` required.
+    #[serde(default)]
+    path: Option<String>,
+    /// Variable overrides (like the CLI `--set`); defaults to the spec's.
+    #[serde(default)]
+    vars: BTreeMap<String, String>,
+    /// Registry URL to use for a by-name spread (overrides the default).
+    #[serde(default)]
+    registry_url: Option<String>,
+    /// Target group name from `groups.toml` (roster path; merged with `nodes`).
+    #[serde(default)]
+    group: Option<String>,
+    /// Ad-hoc node endpoints `host:port` (roster path; merged with `group`).
+    #[serde(default)]
+    nodes: Vec<String>,
+    /// Inline epidemic secret. Falls back to the group's secret file, then
+    /// the default secret path, then a generated secret.
+    #[serde(default)]
+    secret: Option<String>,
+    /// Path to a file containing the epidemic secret.
+    #[serde(default)]
+    secret_path: Option<String>,
+    /// Encrypt the coordinator→node hop (roster path). Requires `tls_ca`.
+    #[serde(default)]
+    tls: bool,
+    /// Root CA (PEM file path) for the nodes' TLS certificates.
+    #[serde(default)]
+    tls_ca: Option<String>,
+    /// Server name the nodes' certs must present (default: the node's host).
+    #[serde(default)]
+    tls_server_name: Option<String>,
+    /// Broadcast (multicast) instead of targeting a roster. Mutually
+    /// exclusive with `group`/`nodes`.
+    #[serde(default)]
+    broadcast: bool,
+    /// Broadcast targeting criteria, `KEY=VALUE` (AND semantics).
+    #[serde(default)]
+    criteria: Vec<String>,
+    /// Canary cohort: a percentage (`"25"`) or a `KEY=VALUE` criterion.
+    #[serde(default)]
+    canary: Option<String>,
+    /// Promote a previous canary (requires `spread_id`).
+    #[serde(default)]
+    promote: bool,
+    /// A fixed spread id (broadcast only; required for `promote`). Roster
+    /// spreads generate their id server-side (same rule as the CLI).
+    #[serde(default)]
+    spread_id: Option<String>,
+    /// Multicast group (default `239.255.77.11`).
+    #[serde(default)]
+    multicast_group: Option<Ipv4Addr>,
+    /// Multicast UDP port (default `7712`).
+    #[serde(default)]
+    multicast_port: Option<u16>,
+    /// Seconds to wait for node callbacks (default `15`).
+    #[serde(default)]
+    wait: Option<u64>,
+}
+
+/// `POST /api/epidemic/spread` — run a spread (roster or broadcast) as the
+/// coordinator and report the full `SpreadRecord` when it finishes.
+///
+/// Scope: `epidemic:spread` (admin `*` covers it; the default reader role
+/// only gets `epidemic:read`). Pre-execution problems are 400; a spread that
+/// ran — even with per-node failures — is a *result* (200, `ok: false`);
+/// server-side failures (secret file, history append) are 500.
+pub async fn trigger_spread(
+    State(state): State<AppState>,
+    Extension(scopes): Extension<Vec<String>>,
+    Json(payload): Json<EpidemicSpreadPayload>,
+) -> ApiResult {
+    require_scope!(&state.auth_config, &scopes, "epidemic:spread");
+
+    let bad_request = |message: String| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"status": "error", "message": message})),
+        )
+    };
+
+    // 1. Pre-validation — the same shared rules the CLI enforces.
+    let canary = match payload
+        .canary
+        .as_deref()
+        .map(pandemic_common::parse_canary_arg)
+        .transpose()
+    {
+        Ok(c) => c,
+        Err(e) => return Err(bad_request(e.to_string())),
+    };
+
+    if let Err(e) = pandemic_common::validate_broadcast(
+        payload.broadcast,
+        payload.group.as_deref(),
+        &payload.nodes,
+        false, // `--discover` is not part of the REST surface
+        &payload.criteria,
+        canary.as_ref(),
+        payload.promote,
+        payload.spread_id.as_deref(),
+    ) {
+        return Err(bad_request(e.to_string()));
+    }
+
+    if payload.tls && payload.tls_ca.is_none() {
+        return Err(bad_request(
+            "tls is enabled but tls_ca (root CA, PEM file) is required".to_string(),
+        ));
+    }
+
+    // 2. Resolve the deployment plan (registry name or local spec path).
+    let build: anyhow::Result<pandemic_common::DeploymentPlan> = match (payload.name, payload.path)
+    {
+        (Some(name), _) => {
+            let client = match payload.registry_url {
+                Some(url) => RegistryClient::with_registry_url(url),
+                None => RegistryClient::new(),
+            };
+            pandemic_common::resolve_deployment_target(&client, &name, &payload.vars).await
+        }
+        (None, Some(path)) => {
+            pandemic_common::build_deployment_plan(std::path::Path::new(&path), &payload.vars)
+        }
+        (None, None) => Err(anyhow::anyhow!(
+            "provide either a registry 'name' or a local spec 'path'"
+        )),
+    };
+    let dp = match build {
+        Ok(dp) => dp,
+        Err(e) => return Err(bad_request(e.to_string())),
+    };
+
+    // 3. Forward live progress to the daemon event bus (topic epidemic.spread).
+    let progress = progress_forwarder(state.socket_path.clone());
+
+    let spread = if payload.broadcast {
+        pandemic_common::run_broadcast_spread(&pandemic_common::BroadcastSpread {
+            plan: dp,
+            secret: pandemic_common::SecretSource::new(
+                payload.secret,
+                payload.secret_path.map(PathBuf::from),
+            ),
+            criteria: payload.criteria,
+            canary,
+            promote: payload.promote,
+            spread_id: payload.spread_id,
+            multicast_group: payload
+                .multicast_group
+                .unwrap_or(pandemic_common::DEFAULT_MULTICAST_GROUP),
+            multicast_port: payload
+                .multicast_port
+                .unwrap_or(pandemic_common::DEFAULT_MULTICAST_PORT),
+            wait_secs: payload.wait.unwrap_or(15),
+            interface: None,
+            history_path: None,
+            progress: Some(progress),
+        })
+        .await
+    } else {
+        let (roster, group_secret_path) =
+            match pandemic_common::resolve_roster(payload.group.as_deref(), &payload.nodes) {
+                Ok(r) => r,
+                Err(e) => return Err(bad_request(e.to_string())),
+            };
+        if roster.is_empty() {
+            return Err(bad_request(
+                "no nodes to spread to — pass 'nodes' (host:port) or a 'group'".to_string(),
+            ));
+        }
+        pandemic_common::run_roster_spread(&pandemic_common::RosterSpread {
+            roster,
+            group: payload.group,
+            group_secret_path,
+            plan: dp,
+            secret: pandemic_common::SecretSource::new(
+                payload.secret,
+                payload.secret_path.map(PathBuf::from),
+            ),
+            tls: pandemic_common::TlsOptions {
+                enabled: payload.tls,
+                ca: payload.tls_ca.map(PathBuf::from),
+                server_name: payload.tls_server_name,
+            },
+            // The roster id is generated server-side (shared rule:
+            // `--spread-id` is a broadcast flag); the console follows the
+            // live `started` event instead.
+            spread_id: None,
+            history_path: None,
+            progress: Some(progress),
+        })
+        .await
+    };
+
+    let result = match spread {
+        Ok(r) => r,
+        Err(e) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"status": "error", "message": e.to_string()})),
+            ))
+        }
+    };
+
+    Ok(Json(json!({
+        "status": "success",
+        "data": {
+            "spread": result.record,
+            "secret_generated": result.generated_secret.is_some(),
+            "generated_secret": result.generated_secret
+        }
+    })))
+}
+
+/// Spawn a task that relays each [`SpreadProgress`](pandemic_protocol::SpreadProgress)
+/// event to the daemon event bus on topic `epidemic.spread`; the console
+/// picks the events up over `/api/events/stream`. Returns the sending half.
+///
+/// A dropped receiver (spread finished first) or an unreachable daemon never
+/// fails the spread — progress is best-effight observation.
+fn progress_forwarder(
+    socket_path: PathBuf,
+) -> tokio::sync::mpsc::UnboundedSender<pandemic_protocol::SpreadProgress> {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        while let Some(progress) = rx.recv().await {
+            let event = match serde_json::to_value(&progress) {
+                Ok(event) => event,
+                Err(e) => {
+                    tracing::warn!("epidemic: dropping progress event (encoding: {e})");
+                    continue;
+                }
+            };
+            let request = Request::Publish {
+                topic: "epidemic.spread".to_string(),
+                data: json!({"spread_progress": event}),
+            };
+            if let Err(e) = DaemonClient::send_request(&socket_path, &request).await {
+                tracing::warn!("epidemic: failed to publish progress event: {e}");
+            }
+        }
+    });
+    tx
+}
+
 #[derive(Deserialize)]
 pub struct DeploymentInstallPayload {
     /// Registry deployment name (by-name install; its infection-spec atoms are
@@ -779,5 +1039,67 @@ mod epidemic_tests {
             q.limit.min(EPIDEMIC_SPREAD_LIMIT_CAP),
             EPIDEMIC_SPREAD_LIMIT_CAP
         );
+    }
+
+    #[test]
+    fn spread_payload_defaults_for_a_minimal_roster_trigger() {
+        let p: EpidemicSpreadPayload = serde_json::from_str(r#"{"name": "web"}"#).unwrap();
+        assert_eq!(p.name.as_deref(), Some("web"));
+        assert!(p.path.is_none());
+        assert!(p.vars.is_empty());
+        assert!(p.group.is_none() && p.nodes.is_empty());
+        assert!(p.secret.is_none() && p.secret_path.is_none());
+        assert!(!p.tls && p.tls_ca.is_none());
+        assert!(!p.broadcast && p.criteria.is_empty());
+        assert!(p.canary.is_none() && !p.promote && p.spread_id.is_none());
+        assert!(p.multicast_group.is_none() && p.multicast_port.is_none());
+        // `wait: None` means "use the handler default (15s)" — the handler
+        // applies `payload.wait.unwrap_or(15)`.
+        assert_eq!(p.wait, None);
+    }
+
+    #[test]
+    fn spread_payload_parses_full_broadcast_options() {
+        let p: EpidemicSpreadPayload = serde_json::from_str(
+            r#"{
+                "name": "web",
+                "vars": {"REPLICAS": "3"},
+                "registry_url": "http://registry:8080",
+                "broadcast": true,
+                "criteria": ["tier=web", "zone=us"],
+                "canary": "25",
+                "multicast_group": "239.255.77.99",
+                "multicast_port": 7799,
+                "wait": 30
+            }"#,
+        )
+        .unwrap();
+        assert!(p.broadcast);
+        assert_eq!(p.criteria, vec!["tier=web", "zone=us"]);
+        assert_eq!(p.canary.as_deref(), Some("25"));
+        assert_eq!(
+            p.multicast_group,
+            Some(std::net::Ipv4Addr::new(239, 255, 77, 99))
+        );
+        assert_eq!(p.multicast_port, Some(7799));
+        assert_eq!(p.wait, Some(30));
+
+        // And a roster-style payload with secrets + TLS:
+        let p: EpidemicSpreadPayload = serde_json::from_str(
+            r#"{
+                "path": "deploy.toml",
+                "group": "prod",
+                "nodes": ["10.0.0.5:7711", "10.0.0.6:7711"],
+                "secret_path": "/etc/pandemic/epidemic.key",
+                "tls": true,
+                "tls_ca": "/etc/pandemic/ca.pem",
+                "tls_server_name": "node-a"
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(p.group.as_deref(), Some("prod"));
+        assert_eq!(p.nodes.len(), 2);
+        assert!(p.tls);
+        assert_eq!(p.tls_server_name.as_deref(), Some("node-a"));
     }
 }

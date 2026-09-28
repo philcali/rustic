@@ -649,6 +649,84 @@ pub struct SpreadRecord {
     pub ok: bool,
 }
 
+// ── Epidemic spread progress (increment 5c): live coordinator events ──────
+//
+// When a spread is triggered from the console (`POST /api/epidemic/spread`),
+// the coordinator emits one of these as it progresses. The REST layer
+// publishes each one to the daemon event bus on topic `epidemic.spread`, and
+// the console's live panel renders them off the existing `/api/events/stream`
+// websocket (filtered by `spread_id`). The CLI emits the same events to a
+// `None` sink, so the wire shape and the audit record never diverge.
+
+/// A node the coordinator is spreading to (roster path).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpreadTarget {
+    /// The node's roster name (ad-hoc nodes name themselves by address).
+    pub name: String,
+    /// The node's endpoint `host:port`.
+    pub addr: String,
+}
+
+/// One progress event during a spread, published on topic `epidemic.spread`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "phase", rename_all = "snake_case")]
+pub enum SpreadProgress {
+    /// The spread has started: what is being applied where.
+    Started {
+        /// The spread's identity (the console tracks progress by this).
+        spread_id: String,
+        /// How the spread reaches its nodes.
+        mode: SpreadMode,
+        /// `full` / `canary` / `promote` (roster is `full`).
+        stage: String,
+        /// The deployment's name.
+        name: String,
+        /// The deployment's version.
+        version: String,
+        /// sha256 of the concrete plan.
+        sha256: String,
+        /// The named target group (roster path).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        group: Option<String>,
+        /// The roster's nodes (roster path; broadcast has none — nodes
+        /// self-select).
+        #[serde(default)]
+        nodes: Vec<SpreadTarget>,
+        /// Targeting criteria (broadcast).
+        #[serde(default)]
+        criteria: Vec<String>,
+        /// The canary cohort (broadcast canary stage).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        canary: Option<Canary>,
+    },
+    /// One node's outcome (as it arrives).
+    Node {
+        /// The spread's identity.
+        spread_id: String,
+        /// The node's name (roster name, or callback peer address).
+        name: String,
+        /// The node's endpoint `host:port`.
+        addr: String,
+        /// Did the node apply the deployment?
+        ok: bool,
+        /// The failure message (when `ok` is false).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
+    /// The spread has finished (the full audit record is in the history).
+    Finished {
+        /// The spread's identity.
+        spread_id: String,
+        /// How many nodes applied.
+        applied: u32,
+        /// How many nodes failed.
+        failed: u32,
+        /// Every node applied, with no failures (a benign promote no-op is
+        /// still `ok`).
+        ok: bool,
+    },
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
