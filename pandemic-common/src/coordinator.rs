@@ -38,8 +38,8 @@ use crate::discovery::DiscoveredNode;
 use crate::groups::{find_group, load_groups_or_default, merge_roster, NodeConfig};
 use crate::{
     auth, deployment_apply_infections, generate_spread_id, history, intent_token, parse_criteria,
-    send_intent, sha256_hex, Criterion, DeploymentPlan, RemoteClient, TlsClient, INTENT_RESENDS,
-    INTENT_VERSION,
+    send_intent, sha256_hex, Criterion, DeploymentPlan, RemoteClient, SpreadRateLimit, TlsClient,
+    INTENT_RESENDS, INTENT_VERSION,
 };
 
 /// The epidemic (network) secret as supplied by the caller: an inline value
@@ -605,6 +605,10 @@ pub struct RosterSpread {
     /// Per-attempt timeout so a hung node is a retriable failure instead of
     /// wedging the spread (4b; default [`DEFAULT_APPLY_TIMEOUT`]).
     pub timeout: Duration,
+    /// Shared rate limit on spread *starts* (4c; default
+    /// [`ratelimit::DEFAULT_RATE_LIMIT_MAX`]/window). Consulted before any
+    /// node is touched; a `RateLimited` refusal is returned before the fan-out.
+    pub rate_limit: SpreadRateLimit,
     /// A fixed spread id (caller-generated when it must be known up front,
     /// e.g. before streaming progress); a fresh one is generated otherwise.
     pub spread_id: Option<String>,
@@ -619,6 +623,11 @@ pub struct RosterSpread {
 /// Run a roster spread: apply the plan to every node, stream per-node results,
 /// append the audit record to the history, and report the outcome.
 pub async fn run_roster_spread(opts: &RosterSpread) -> Result<SpreadResult> {
+    // 4c: consult the shared rate limit on spread *starts* before touching any
+    // node. A refusal is returned here — reported (CLI non-zero exit / REST 429
+    // with retry-after) — without emitting progress or dialing a single node.
+    opts.rate_limit.record()?;
+
     let spread_id = opts.spread_id.clone().unwrap_or_else(generate_spread_id);
 
     // The identical concrete plan goes to every node; serialize it once so
@@ -749,6 +758,10 @@ pub struct BroadcastSpread {
     /// The LAN interface to advertise as the callback origin
     /// (absent: the primary LAN address is inferred).
     pub interface: Option<Ipv4Addr>,
+    /// Shared rate limit on spread *starts* (4c; default
+    /// [`ratelimit::DEFAULT_RATE_LIMIT_MAX`]/window). Consulted before the
+    /// intent is sent; a `RateLimited` refusal is returned before any node.
+    pub rate_limit: SpreadRateLimit,
     /// Where to append the audit record
     /// (default: [`history::default_history_path`]).
     pub history_path: Option<PathBuf>,
@@ -760,6 +773,10 @@ pub struct BroadcastSpread {
 /// Run a broadcast spread: sign + send the intent, serve the callbacks,
 /// stream per-node results, append the audit record, and report the outcome.
 pub async fn run_broadcast_spread(opts: &BroadcastSpread) -> Result<SpreadResult> {
+    // 4c: consult the shared rate limit on spread *starts* before sending the
+    // intent — a refusal is reported before any node self-selects.
+    opts.rate_limit.record()?;
+
     let name = opts.plan.spec.meta.name.clone();
     let version = opts.plan.spec.meta.version.clone();
 

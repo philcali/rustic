@@ -9,6 +9,7 @@ pub mod groups;
 pub mod history;
 pub mod intent;
 pub mod multicast;
+pub mod ratelimit;
 pub mod registry;
 pub mod remote;
 pub mod resolve;
@@ -46,6 +47,10 @@ pub use intent::{
 };
 pub use multicast::{
     send_intent, IntentListener, DEFAULT_MULTICAST_GROUP, DEFAULT_MULTICAST_PORT, INTENT_RESENDS,
+};
+pub use ratelimit::{
+    default_rate_limit_path, RateLimited, SpreadRateLimit, DEFAULT_RATE_LIMIT_MAX,
+    DEFAULT_RATE_LIMIT_WINDOW_SECS,
 };
 pub use registry::{
     extract_bundle, verify_sha256, InfectionManifest, InfectionSummary, RegistryClient,

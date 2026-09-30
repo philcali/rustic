@@ -30,8 +30,12 @@ socket2 = "0.5"
 # agnostic-mdns -> agnostic-net enables rustix with only the `net` feature, but
 # rustix >= 1.1.5 compiles `net/sockopt.rs` against `crate::timespec`, which
 # needs the `time` feature (upstream feature-gating bug). Enabling `time` here
-# fixes the build for the whole dependency graph; we do not call rustix directly.
-rustix = { version = "1", features = ["time"] }
+# fixes the build for the whole dependency graph.
+#
+# `fs` is enabled so the shared spread rate limiter (increment 4c) can take an
+# advisory `flock` on its state file — pure Rust, already in the lockfile, no
+# new heavy dependency.
+rustix = { version = "1", features = ["time", "fs"] }
 # Bundle extraction for registry spec/deployment atoms (pure-Rust, musl-safe).
 tar = "0.4"
 flate2 = "1.0"

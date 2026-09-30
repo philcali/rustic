@@ -413,6 +413,69 @@ pandemic-cli epidemic spread ./webapp/deployment.toml --group edge \
 The console's per-node rows show a small **"N×"** badge when a node needed more
 than one attempt.
 
+### Rate limiting
+
+Spreads are *expensive* — each one dials every node in the group. A stray
+script, a misbehaving agent, or a loop can turn `epidemic spread` into a
+storm. So every spread **start** (roster *and* broadcast) is counted against a
+sliding-window rate limit: at most `MAX` starts in any rolling `WINDOW`.
+
+- Enforced **before any node is touched** — a refused spread is rejected up
+  front, so the nodes never see it.
+- **One window shared by the CLI and the REST server.** The limit is kept in
+  a small state file and guarded with an advisory lock (`flock`), so a check
+  and a record are atomic even across processes. The state-file path is
+  **not** something the client can point at a private file — that would let a
+  caller bypass the shared limit.
+- A **refused** spread consumes no slot (only successful starts are counted).
+- Refusal is *reported*, never lost: the CLI exits non-zero with a
+  human-readable reason; the REST trigger returns **HTTP `429`** with a
+  `retry_after` (seconds) in the JSON body.
+
+Defaults are **100 starts per 60 s**; set `MAX` to `0` to disable the limit
+entirely (useful in tests / a single trusted operator).
+
+Override per spread:
+
+| Surface | Flags / fields | Meaning |
+|---|---|---|
+| CLI | `--rate-limit MAX/WINDOW` | e.g. `2/60` = at most 2 starts per rolling 60 s; `0` disables |
+| CLI | `--rate-limit MAX` | bare `MAX` uses the default 60 s window |
+| REST | `rate_limit_max` | max starts per window (default `100`) |
+| REST | `rate_limit_window_secs` | window in seconds (default `60`) |
+
+```bash
+# Tighten the limit for a cautious rollout: 5 starts per 30 s.
+pandemic-cli epidemic spread ./webapp/deployment.toml --group edge \
+  --rate-limit 5/30
+
+# Disable the limit (a single trusted operator / tests):
+pandemic-cli epidemic spread ./webapp/deployment.toml --group edge \
+  --rate-limit 0
+```
+
+```json
+// REST: at most 3 spreads per rolling 120 s
+{
+  "path": "webapp/deployment.toml",
+  "nodes": ["10.0.0.5:7711"],
+  "rate_limit_max": 3,
+  "rate_limit_window_secs": 120
+}
+```
+
+A refusal looks like this — the CLI exits non-zero and prints:
+
+```
+Error: spread rate limit reached: 2 spread(s) already started in the last 60s; try again in ~59s
+```
+
+and the REST trigger returns `429`:
+
+```json
+{ "status": "error", "message": "spread rate limit reached: …", "retry_after": 59 }
+```
+
 ### Reading it in the console
 
 The same history and the roster groups are exposed read-only through
@@ -502,6 +565,10 @@ node, and a node never learns about its peers.
   resolved deployment (variables + rendered infections) — the same bytes
   `deployment install` would apply locally. State records and the audit log on
   each node stay `0600` root-only.
+- **Spreads are rate-limited.** A sliding-window limit on spread *starts*
+  (default 100/60 s, shared by CLI and REST, enforced before any node is
+  touched) is the first line of defense against a runaway script or loop
+  flooding a group of nodes. See [Rate limiting](#rate-limiting).
 - **Transport is authenticated, not encrypted (yet).** The HMAC handshake
   proves the peer holds the shared secret, but the deployment payload travels
   in cleartext over TCP. For anything beyond a trusted LAN, put the node
@@ -527,11 +594,12 @@ The larger epidemic vision (discovery, multicast, reliability) is tracked in
    canary + promote — *done* (node joins the intent group;
    `epidemic spread --broadcast`; `epidemic spreads` history).
 4. **Reliability + hardening** — TLS on the coordinator→node hop, the
-   sender-side audit record, and **retries + idempotency** (transient-vs-verdict,
+   sender-side audit record, **retries + idempotency** (transient-vs-verdict,
    per-attempt timeout, per-node `attempts`; see [Retries and
-   idempotency](#retries-and-idempotency)) are *done*; rate limiting (4c),
-   per-node secrets/mTLS (4e), and payload signing (4d — the production gate)
-   remain.
+   idempotency](#retries-and-idempotency)), and **rate limiting** on spread
+   starts (shared CLI+REST sliding window; see [Rate
+   limiting](#rate-limiting)) are *done*; per-node secrets/mTLS (4e) and
+   payload signing (4d — the production gate) remain.
 5. **Observability** — *done.* The audit/record foundation (every spread
    records a per-node outcome, readable via `epidemic spreads`), the
    read-only console surface (REST `GET /api/epidemic/spreads` +

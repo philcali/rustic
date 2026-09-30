@@ -25,8 +25,17 @@ Planned improvements for the Pandemic codebase.
   is retried with exponential backoff and its `attempts` are recorded per node,
   while a node *verdict* (it answered "unit is masked", "already applied", …)
   is final and never re-asked; CLI `--retries`/`--apply-timeout` and REST
-  `retries`/`timeout_secs` override the defaults of 2 retries / 30 s)**. Still open: the
-  rest of Increment 4 (rate limiting, payload signing, per-node
+  `retries`/`timeout_secs` override the defaults of 2 retries / 30 s)**. And
+  **4c (rate limiting: a shared, file-backed sliding window on spread *starts*
+  — at most `MAX` starts within a rolling `WINDOW` — enforced in the coordinator
+  before any node is touched, so a spread storm is stopped up front. The window
+  is one across the CLI *and* the REST server (file `flock` makes the
+  check-and-record atomic; a refused spread consumes no slot), the state file is
+  not client-selectable (no bypass), and a refusal is reported — CLI non-zero
+  exit, REST `429` with a `retry_after` — not silently dropped. CLI
+  `--rate-limit MAX/WINDOW` and REST `rate_limit_max`/`rate_limit_window_secs`
+  override the default of 100 per 60 s; `0` disables)**. Still open: the
+  rest of Increment 4 (payload signing, per-node
   secrets/mTLS). The codified, cross-session build plan
   — fixed decisions, increment status, resume point, and code map — lives in
   [`ideas/epidemic_infections.md`](ideas/epidemic_infections.md).

@@ -45,10 +45,11 @@ use pandemic_common::groups::{
     default_groups_path, find_group, load_groups_or_default, GroupConfig,
 };
 use pandemic_common::{
-    deployment_apply_infections, generate_spread_id, history, merge_discovered, parse_canary_arg,
-    primary_lan_ip, resolve_roster, run_broadcast_spread, run_roster_spread, sha256_hex,
-    validate_broadcast, BroadcastSpread, RosterSpread, SecretSource, TlsOptions,
-    DEFAULT_APPLY_RETRIES, DEFAULT_APPLY_TIMEOUT, DEFAULT_MULTICAST_GROUP, DEFAULT_MULTICAST_PORT,
+    default_rate_limit_path, deployment_apply_infections, generate_spread_id, history,
+    merge_discovered, parse_canary_arg, primary_lan_ip, resolve_roster, run_broadcast_spread,
+    run_roster_spread, sha256_hex, validate_broadcast, BroadcastSpread, RosterSpread, SecretSource,
+    SpreadRateLimit, TlsOptions, DEFAULT_APPLY_RETRIES, DEFAULT_APPLY_TIMEOUT,
+    DEFAULT_MULTICAST_GROUP, DEFAULT_MULTICAST_PORT, DEFAULT_RATE_LIMIT_WINDOW_SECS,
 };
 use pandemic_protocol::{AgentRequest, Canary, SpreadMode, SpreadRecord, SpreadStage};
 
@@ -91,6 +92,34 @@ struct BroadcastCli {
     multicast_port: u16,
     /// How long to wait for node callbacks before reporting the result.
     wait_secs: u64,
+}
+
+/// Parse a `--rate-limit MAX/WINDOW` spec into `(max, window_secs)`. Accepts
+/// `MAX/WINDOW`, a bare `MAX` (default window), or `0` (disables the limit).
+fn parse_rate_limit(spec: &str) -> Result<(u32, u64)> {
+    let spec = spec.trim();
+    let (max_s, window_s) = match spec.split_once('/') {
+        Some((m, w)) => (m.trim(), Some(w.trim())),
+        None => (spec, None),
+    };
+    let max: u32 = max_s
+        .parse()
+        .with_context(|| format!("--rate-limit: invalid max '{max_s}' (expected MAX/WINDOW)"))?;
+    if max == 0 {
+        return Ok((0, 0)); // explicitly disabled
+    }
+    let window = match window_s {
+        Some(w) => w
+            .parse::<u64>()
+            .with_context(|| format!("--rate-limit: invalid window '{w}' (seconds)"))?,
+        None => DEFAULT_RATE_LIMIT_WINDOW_SECS,
+    };
+    if window == 0 {
+        return Err(anyhow!(
+            "--rate-limit: window must be > 0 seconds (use --rate-limit 0 to disable)"
+        ));
+    }
+    Ok((max, window))
 }
 
 #[derive(clap::Subcommand)]
@@ -180,6 +209,14 @@ pub enum EpidemicAction {
         /// retried after this long. Default: 30.
         #[arg(long, default_value_t = DEFAULT_APPLY_TIMEOUT.as_secs())]
         apply_timeout: u64,
+
+        // ── Rate limiting (increment 4c): stop spread storms ───────────────
+        /// Rate limit on spread *starts*, shared with the REST API (one
+        /// window, not one per process): MAX spreads within a WINDOW-second
+        /// rolling window. `MAX/WINDOW` or bare `MAX` (default 60s window);
+        /// `0` disables the limit. Default: 100 per 60s.
+        #[arg(long = "rate-limit", value_name = "MAX/WINDOW")]
+        rate_limit: Option<String>,
     },
     /// List recent spreads (roster + broadcast, newest first)
     Spreads {
@@ -233,8 +270,18 @@ pub async fn handle_epidemic_command(
             tls_server_name,
             retries,
             apply_timeout,
+            rate_limit,
         } => {
             let secret = SecretSource::new(epidemic_secret, epidemic_secret_path);
+            // 4c: one shared window (CLI + REST), file-backed at the default
+            // path unless the caller overrides the policy.
+            let rate_limit = match rate_limit {
+                Some(spec) => {
+                    let (max, window) = parse_rate_limit(&spec)?;
+                    SpreadRateLimit::new(max, window, default_rate_limit_path())
+                }
+                None => SpreadRateLimit::default_policy(),
+            };
             let probe = Discovery {
                 enabled: discover,
                 interface,
@@ -265,6 +312,7 @@ pub async fn handle_epidemic_command(
                 tls_opts,
                 retries,
                 Duration::from_secs(apply_timeout),
+                rate_limit,
             )
             .await
         }
@@ -309,6 +357,7 @@ async fn spread(
     tls: TlsOptions,
     retries: u32,
     apply_timeout: Duration,
+    rate_limit: SpreadRateLimit,
 ) -> Result<()> {
     // Broadcast flag validation (cheap, up front — before any network I/O).
     validate_broadcast(
@@ -332,6 +381,7 @@ async fn spread(
             dry_run,
             epidemic_secret,
             probe.interface,
+            rate_limit,
             &BroadcastCli {
                 criteria,
                 canary,
@@ -411,6 +461,7 @@ async fn spread(
         tls,
         retries,
         timeout: apply_timeout,
+        rate_limit,
         spread_id: None,
         history_path: None,
         progress: None,
@@ -468,6 +519,7 @@ fn print_roster_results(rec: &SpreadRecord) -> Result<()> {
 
 /// The broadcast path (CLI wrapper): resolve the plan, optionally dry-run,
 /// then run the shared broadcast coordinator and print its audit record.
+#[allow(clippy::too_many_arguments)]
 async fn run_broadcast_cli(
     target: &str,
     set_args: &[String],
@@ -475,6 +527,7 @@ async fn run_broadcast_cli(
     dry_run: bool,
     epidemic_secret: SecretSource,
     interface: Option<Ipv4Addr>,
+    rate_limit: SpreadRateLimit,
     bcast: &BroadcastCli,
 ) -> Result<()> {
     // 1. Pure Plan step (shared with the roster path) — one concrete plan.
@@ -537,6 +590,7 @@ async fn run_broadcast_cli(
         multicast_port: bcast.multicast_port,
         wait_secs: bcast.wait_secs,
         interface,
+        rate_limit,
         history_path: None,
         progress: None,
     })

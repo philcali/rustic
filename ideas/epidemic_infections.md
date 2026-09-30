@@ -54,7 +54,7 @@ Epidemic infections enable configuration and updates to "spread" across pandemic
 | 1 | Node / group / coordinator + reliable TCP spread | Foundation | **done** (v0.5.0) |
 | 2 | Discovery (mDNS/Bonjour) — roster discovery | Level 1 | **done** |
 | 3 | Multicast + targeting + canary | Level 2 | **done** |
-| 4 | Reliability + hardening (retries, audit, rate-limit, per-node secrets, TLS, signing) | Level 3 + Phase 4 | **in progress** — 4a TLS done; 4b retries + idempotency done (transient-vs-verdict, per-attempt timeout, per-node `attempts`, CLI `--retries`/`--apply-timeout`, REST `retries`/`timeout_secs`); sender-side audit done (shipped as 5a); **remaining: 4c rate-limit, 4d payload signing, 4e per-node secrets/mTLS** |
+| 4 | Reliability + hardening (retries, audit, rate-limit, per-node secrets, TLS, signing) | Level 3 + Phase 4 | **in progress** — 4a TLS done; 4b retries + idempotency done (transient-vs-verdict, per-attempt timeout, per-node `attempts`, CLI `--retries`/`--apply-timeout`, REST `retries`/`timeout_secs`); 4c rate limiting done (shared CLI+REST sliding window on spread starts, refusal = CLI non-zero exit / REST 429 + `retry_after`); sender-side audit done (shipped as 5a); **remaining: 4d payload signing, 4e per-node secrets/mTLS** |
 | 5 | Epidemic observability (console / UI to see + manage the spread) | Cross-cutting (all levels) | **done** — 5a audit/record foundation, 5b read-only console, 5c console trigger + live progress all shipped |
 
 #### Increment 1 — Node / group / coordinator + reliable TCP spread — **done**
@@ -209,7 +209,24 @@ Goal: make epidemic production-grade.
   `--apply-timeout`, REST `retries` / `timeout_secs`, and the console's per-node
   "N×" badge. (The sibling **sender-side audit** entry per spread shipped as
   5a.)
-- **Rate limiting** to prevent spread storms — **remaining (4c).**
+- **Rate limiting** to prevent spread storms — **done (4c).** A shared,
+  file-backed sliding window on spread *starts*: at most `MAX` starts within a
+  rolling `WINDOW` (default 100 per 60 s). Enforced in the shared coordinator
+  *before* any node is touched, so a storm is stopped up front — a refusal is
+  reported (CLI non-zero exit; REST `429` + `retry_after`), never silently
+  queued or fanned out. The window is **one across the CLI and the REST server**
+  (file-backed like the 5a history; a `flock` on the state file makes the
+  check-and-record atomic across those processes), and the state-file path is
+  *not* client-selectable (a custom path would let a caller bypass the shared
+  limit). A refused spread consumes no slot. A start made at `t` counts until
+  `t + window` (exclusive), so a slot frees exactly `window` seconds later.
+  Lives in `pandemic-common/src/ratelimit.rs` (`SpreadRateLimit` + the
+  `RateLimited` error); consulted at the top of `run_roster_spread` /
+  `run_broadcast_spread`. Surfaces: CLI `--rate-limit MAX/WINDOW` (bare `MAX`
+  ⇒ default window; `0` disables), REST `rate_limit_max` /
+  `rate_limit_window_secs`. Tests: `ratelimit::tests` (under/over limit, window
+  frees slots, disabled no-op, shared across instances, a concurrent race lets
+  exactly `MAX` win).
 - **Payload signing** (the production gate, shared with the registry): a node
   only applies a deployment it can verify — **remaining (4d).**
 - **per-node secrets or mTLS identity** in place of the single shared group
@@ -327,6 +344,23 @@ events it produced — so **"see the spread" is the honest first slice**, ahead 
   `attempts:1`; a refused/dead node retried to `attempts:3` **and reported, not
   silently lost**; a verdict node `attempts:1` and never re-asked; a
   drop-then-serve node recovered on retry. Reader key → 403 on the trigger.
+- **4c is done and committed.** Rate limiting on spread *starts*: a shared,
+  file-backed sliding window (`MAX` per rolling `WINDOW`, default 100/60 s),
+  enforced in the coordinator **before any node is touched** so a storm is
+  stopped up front. The window is **one across the CLI and the REST server**
+  (file `flock` makes check-and-record atomic; the state-file path is not
+  client-selectable, so no bypass) and a refused spread consumes no slot. A
+  refusal is reported, not lost: CLI non-zero exit, REST `429` + `retry_after`.
+  Surfaces: CLI `--rate-limit MAX/WINDOW` (`0` disables), REST
+  `rate_limit_max` / `rate_limit_window_secs`. Lives in
+  `pandemic-common/src/ratelimit.rs`; consulted at the top of
+  `run_roster_spread` / `run_broadcast_spread`. Verified in-process
+  (`ratelimit::tests`, incl. a concurrent race letting exactly `MAX` win) and
+  E2E in docker (`pandemic-systemd:latest`, node at `127.0.0.1:7711`): a
+  limit of `2/60` let two spreads through and the third came back **HTTP 429
+  with `retry_after`** (state file held exactly 2 stamps); CLI + REST together
+  exhausted a `2` limit and the third (CLI) exited **non-zero** — proving one
+  shared window; `--rate-limit 0` disabled it cleanly.
 - **5c is done and committed — Increment 5 is complete.** 5a (audit record),
   5b (read surface: `GET /api/epidemic/spreads`, `GET /api/epidemic/groups`,
   scope `epidemic:read`, the console's **Epidemic** section), and 5c (trigger:
@@ -334,9 +368,9 @@ events it produced — so **"see the spread" is the honest first slice**, ahead 
   `/api/events/stream`) are all in. The shared code — coordinator logic in
   `pandemic-common::coordinator`, history in `pandemic-common::history`,
   types in `pandemic-protocol` — is used by CLI and REST alike, read- and
-  write-side. **Next up: the rest of Increment 4** — 4c rate limiting, 4d
-  **payload signing** (the production gate, shared with the registry), and 4e
-  per-node secrets / mTLS identity.
+  write-side. **Next up: the rest of Increment 4** — 4d **payload signing**
+  (the production gate, shared with the registry) and 4e per-node secrets /
+  mTLS identity. (4c rate limiting is done — see its bullet above.)
 - **The gate to pass before an increment counts as done** (mirrors CI):
   `cargo build --workspace` && `cargo clippy --workspace -- -D warnings` &&
   `cargo fmt --check` && `cargo test --workspace`.
@@ -413,6 +447,23 @@ events it produced — so **"see the spread" is the honest first slice**, ahead 
     (`retry_recovers_after_transient_failures`, `retry_gives_up_after_max_retries`,
     `verdict_is_not_retried`, `timeout_is_transient_and_retried`) are in the
     same file's `#[cfg(test)]`.
+  - `pandemic-common/src/ratelimit.rs` — the **shared** rate limiter (4c):
+    `SpreadRateLimit` (`max_in_window` / `window_secs` / `path`; `max==0`
+    disables), `record()` (a `rustix::fs::flock` exclusive lock makes the
+    read→check→append atomic across CLI + REST processes), `RateLimited`
+    (carries `retry_after`), `default_rate_limit_path` (XDG_STATE_HOME →
+    `~/.local/state` → `/etc/pandemic`), and the defaults
+    `DEFAULT_RATE_LIMIT_MAX` (100) / `DEFAULT_RATE_LIMIT_WINDOW_SECS` (60).
+    The window is a sliding list of start-stamps kept inside `(now - window,
+    now]` (exclusive lower bound, so a slot frees exactly `window` seconds
+    after a start). Consulted at the very top of `run_roster_spread` /
+    `run_broadcast_spread` — a refusal happens **before any node is touched**
+    and consumes no slot. Surfaces: CLI `--rate-limit MAX/WINDOW` (or bare
+    `MAX` → default window; `0` disables), REST `rate_limit_max` /
+    `rate_limit_window_secs` (the state path is **not** client-selectable).
+    Refusal → CLI non-zero exit, REST `429` + `retry_after` in the JSON body.
+    Tests: `ratelimit::tests` (under/over limit, window expiry, disabled,
+    shared-across-instances, and a 20-thread race where exactly `MAX` win).
   - How-to: `docs/epidemic.md`; operator loop: `e2e/README.md` (epidemic section).
 
 ---

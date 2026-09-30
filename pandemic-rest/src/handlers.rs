@@ -680,6 +680,16 @@ pub struct EpidemicSpreadPayload {
     /// never answers is retried after this long.
     #[serde(default)]
     timeout_secs: Option<u64>,
+    /// Rate limit on spread *starts*, shared with the CLI (one window, file
+    /// backed): max spreads per window. `0` disables. Default
+    /// [`DEFAULT_RATE_LIMIT_MAX`]. The state-file path is *not* client-selectable
+    /// (a custom path would let a caller bypass the shared limit).
+    #[serde(default)]
+    rate_limit_max: Option<u32>,
+    /// Rolling-window length in seconds for the rate limit (default
+    /// [`DEFAULT_RATE_LIMIT_WINDOW_SECS`]).
+    #[serde(default)]
+    rate_limit_window_secs: Option<u64>,
 }
 
 /// `POST /api/epidemic/spread` — run a spread (roster or broadcast) as the
@@ -758,6 +768,19 @@ pub async fn trigger_spread(
     // 3. Forward live progress to the daemon event bus (topic epidemic.spread).
     let progress = progress_forwarder(state.socket_path.clone());
 
+    // 4c: the shared rate limit on spread *starts*. The state-file path is the
+    // fixed default (never client-supplied) so the CLI and this endpoint draw
+    // from one window; a max of 0 disables it.
+    let rate_limit = pandemic_common::SpreadRateLimit::new(
+        payload
+            .rate_limit_max
+            .unwrap_or(pandemic_common::DEFAULT_RATE_LIMIT_MAX),
+        payload
+            .rate_limit_window_secs
+            .unwrap_or(pandemic_common::DEFAULT_RATE_LIMIT_WINDOW_SECS),
+        pandemic_common::default_rate_limit_path(),
+    );
+
     let spread = if payload.broadcast {
         pandemic_common::run_broadcast_spread(&pandemic_common::BroadcastSpread {
             plan: dp,
@@ -777,6 +800,7 @@ pub async fn trigger_spread(
                 .unwrap_or(pandemic_common::DEFAULT_MULTICAST_PORT),
             wait_secs: payload.wait.unwrap_or(15),
             interface: None,
+            rate_limit,
             history_path: None,
             progress: Some(progress),
         })
@@ -815,6 +839,7 @@ pub async fn trigger_spread(
                     .timeout_secs
                     .unwrap_or(pandemic_common::DEFAULT_APPLY_TIMEOUT.as_secs()),
             ),
+            rate_limit,
             // The roster id is generated server-side (shared rule:
             // `--spread-id` is a broadcast flag); the console follows the
             // live `started` event instead.
@@ -828,10 +853,25 @@ pub async fn trigger_spread(
     let result = match spread {
         Ok(r) => r,
         Err(e) => {
+            // 4c: a rate-limited spread is refused up front (before any node is
+            // touched). Report 429 with a `retry_after` the client can honor —
+            // distinct from a 500 fault, so automation backs off instead of
+            // assuming the server is broken.
+            if let Some(rate_limited) = e.downcast_ref::<pandemic_common::RateLimited>() {
+                let retry_after = rate_limited.retry_after.as_secs().max(1);
+                return Err((
+                    StatusCode::TOO_MANY_REQUESTS,
+                    Json(json!({
+                        "status": "error",
+                        "message": e.to_string(),
+                        "retry_after": retry_after,
+                    })),
+                ));
+            }
             return Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"status": "error", "message": e.to_string()})),
-            ))
+            ));
         }
     };
 
