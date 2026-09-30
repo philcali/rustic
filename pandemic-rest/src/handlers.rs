@@ -672,6 +672,14 @@ pub struct EpidemicSpreadPayload {
     /// Seconds to wait for node callbacks (default `15`).
     #[serde(default)]
     wait: Option<u64>,
+    /// Retries per node after a transient failure (roster path; default
+    /// [`DEFAULT_APPLY_RETRIES`]). A node verdict is never retried.
+    #[serde(default)]
+    retries: Option<u32>,
+    /// Per-attempt timeout in seconds (roster path; default 30). A node that
+    /// never answers is retried after this long.
+    #[serde(default)]
+    timeout_secs: Option<u64>,
 }
 
 /// `POST /api/epidemic/spread` — run a spread (roster or broadcast) as the
@@ -798,6 +806,15 @@ pub async fn trigger_spread(
                 ca: payload.tls_ca.map(PathBuf::from),
                 server_name: payload.tls_server_name,
             },
+            // Retries + per-attempt timeout (4b); defaults mirror the CLI.
+            retries: payload
+                .retries
+                .unwrap_or(pandemic_common::DEFAULT_APPLY_RETRIES),
+            timeout: std::time::Duration::from_secs(
+                payload
+                    .timeout_secs
+                    .unwrap_or(pandemic_common::DEFAULT_APPLY_TIMEOUT.as_secs()),
+            ),
             // The roster id is generated server-side (shared rule:
             // `--spread-id` is a broadcast flag); the console follows the
             // live `started` event instead.
@@ -1056,6 +1073,11 @@ mod epidemic_tests {
         // `wait: None` means "use the handler default (15s)" — the handler
         // applies `payload.wait.unwrap_or(15)`.
         assert_eq!(p.wait, None);
+        // `retries`/`timeout_secs: None` means "use the coordinator defaults"
+        // — the handler applies `.unwrap_or(DEFAULT_APPLY_RETRIES)` /
+        // `.unwrap_or(DEFAULT_APPLY_TIMEOUT)`.
+        assert_eq!(p.retries, None);
+        assert_eq!(p.timeout_secs, None);
     }
 
     #[test]
@@ -1093,7 +1115,9 @@ mod epidemic_tests {
                 "secret_path": "/etc/pandemic/epidemic.key",
                 "tls": true,
                 "tls_ca": "/etc/pandemic/ca.pem",
-                "tls_server_name": "node-a"
+                "tls_server_name": "node-a",
+                "retries": 5,
+                "timeout_secs": 10
             }"#,
         )
         .unwrap();
@@ -1101,5 +1125,7 @@ mod epidemic_tests {
         assert_eq!(p.nodes.len(), 2);
         assert!(p.tls);
         assert_eq!(p.tls_server_name.as_deref(), Some("node-a"));
+        assert_eq!(p.retries, Some(5));
+        assert_eq!(p.timeout_secs, Some(10));
     }
 }

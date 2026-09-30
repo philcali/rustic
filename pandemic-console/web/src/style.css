@@ -831,6 +831,13 @@ section h3 {
   word-break: break-word;
 }
 
+.epidemic-attempts {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
 .epidemic-muted {
   color: var(--text-muted);
   font-size: 0.85rem;

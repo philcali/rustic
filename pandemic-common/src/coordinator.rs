@@ -204,32 +204,122 @@ pub fn host_of(addr: &str) -> String {
     addr.split(':').next().unwrap_or(addr).to_string()
 }
 
-/// Ping a node, then apply the deployment. A failed ping is reported as
-/// "unreachable"; an apply error is reported with the node's own message. When
-/// `tls` is set (increment 4), the connection is wrapped in TLS with the
-/// shared trust config before the shared handshake.
-pub async fn apply_to_node(
+/// Default retry policy (increment 4b): a dropped node is retried and
+/// reported, not silently lost. `retries` is the number of *re*-attempts
+/// after the first one, and the timeout bounds each attempt (a hung node
+/// becomes a retriable failure instead of wedging the spread).
+pub const DEFAULT_APPLY_RETRIES: u32 = 2;
+pub const DEFAULT_APPLY_TIMEOUT: Duration = Duration::from_secs(30);
+/// Backoff base between attempts; doubles per retry (500ms, 1s, 2s, …).
+const RETRY_BACKOFF_BASE: Duration = Duration::from_millis(500);
+
+/// The result of one apply attempt against one node.
+enum ApplyResult {
+    /// The node applied the deployment.
+    Ok,
+    /// A transport-level failure (dial, handshake, timeout): the node never
+    /// gave a verdict, so asking again is safe and useful. Retried.
+    Transient(String),
+    /// The node answered with an error verdict: re-asking with the same plan
+    /// gets the same verdict, so the retry loop stops here. Not retried.
+    Verdict(String),
+}
+
+/// The final outcome of applying to one node (after any retries).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApplyOutcome {
+    /// Did the node apply the deployment?
+    pub ok: bool,
+    /// The failure message (when `ok` is false).
+    pub error: Option<String>,
+    /// How many attempts were made (1..=`retries`+1).
+    pub attempts: u32,
+}
+
+/// One attempt against a node (ping + apply), bounded by `timeout`.
+///
+/// A failed ping, a dropped connection, or a timeout is a **transient**
+/// failure — the node never reached a verdict. A `Response::Error` /
+/// `NotFound` from the node is a **verdict** — the node said no, and the
+/// same plan will get the same answer.
+///
+/// When `tls` is set (increment 4a) the connection is wrapped in TLS with
+/// the shared trust config before the shared handshake. Re-applying is safe:
+/// the agent's install steps are idempotent by design, so a retry after a
+/// partial apply resumes where it left off (4b idempotency).
+async fn apply_once(
     addr: &str,
     secret: &str,
     request: &AgentRequest,
     tls: Option<&TlsClient>,
-) -> Result<()> {
+    timeout: Duration,
+) -> ApplyResult {
     let client = match tls {
         Some(tls) => RemoteClient::new(addr, secret).with_tls(tls.clone()),
         None => RemoteClient::new(addr, secret),
     };
-    client
-        .ping()
-        .await
-        .with_context(|| format!("node {addr} unreachable"))?;
-    let response = client
-        .send_agent_request(request)
-        .await
-        .with_context(|| format!("node {addr} failed to apply"))?;
-    match response {
-        Response::Success { .. } => Ok(()),
-        Response::Error { message } => Err(anyhow::anyhow!("{message}")),
-        Response::NotFound { message } => Err(anyhow::anyhow!("{message}")),
+    let attempt = async {
+        if let Err(e) = client.ping().await {
+            return ApplyResult::Transient(format!("node {addr} unreachable: {e:#}"));
+        }
+        match client.send_agent_request(request).await {
+            Ok(Response::Success { .. }) => ApplyResult::Ok,
+            Ok(Response::Error { message }) => ApplyResult::Verdict(message),
+            Ok(Response::NotFound { message }) => ApplyResult::Verdict(message),
+            Err(e) => ApplyResult::Transient(format!("node {addr} failed to apply: {e:#}")),
+        }
+    };
+    match tokio::time::timeout(timeout, attempt).await {
+        Ok(result) => result,
+        Err(_) => ApplyResult::Transient(format!(
+            "node {addr} timed out after {timeout:?} (no verdict)"
+        )),
+    }
+}
+
+/// Apply to one node with the retry policy: transient failures are retried
+/// up to `retries` more times with exponential backoff (500ms, 1s, 2s, …);
+/// a node verdict is final. The outcome always reports how many attempts
+/// were made, so a dropped node is *retried and reported*, not silently
+/// lost (increment 4b).
+pub async fn apply_with_retries(
+    addr: &str,
+    secret: &str,
+    request: &AgentRequest,
+    tls: Option<&TlsClient>,
+    retries: u32,
+    timeout: Duration,
+) -> ApplyOutcome {
+    let mut attempts = 0u32;
+    loop {
+        attempts += 1;
+        match apply_once(addr, secret, request, tls, timeout).await {
+            ApplyResult::Ok => {
+                return ApplyOutcome {
+                    ok: true,
+                    error: None,
+                    attempts,
+                }
+            }
+            ApplyResult::Verdict(message) => {
+                return ApplyOutcome {
+                    ok: false,
+                    error: Some(message),
+                    attempts,
+                }
+            }
+            ApplyResult::Transient(message) => {
+                if attempts > retries {
+                    return ApplyOutcome {
+                        ok: false,
+                        error: Some(message),
+                        attempts,
+                    };
+                }
+                let backoff = RETRY_BACKOFF_BASE * 2u32.saturating_pow(attempts - 1);
+                tokio::time::sleep(backoff).await;
+            }
+        }
     }
 }
 
@@ -241,7 +331,7 @@ pub fn roster_record(
     name: &str,
     version: &str,
     plan_sha: &str,
-    results: &[(NodeConfig, Result<()>)],
+    results: &[(NodeConfig, ApplyOutcome)],
 ) -> SpreadRecord {
     let nodes = roster_node_results(results);
     let applied = nodes.iter().filter(|n| n.ok).count() as u32;
@@ -268,22 +358,15 @@ pub fn roster_record(
 
 /// Per-node results from the roster path (the coordinator knows each node's
 /// name and address from the roster).
-pub fn roster_node_results(results: &[(NodeConfig, Result<()>)]) -> Vec<SpreadNodeResult> {
+pub fn roster_node_results(results: &[(NodeConfig, ApplyOutcome)]) -> Vec<SpreadNodeResult> {
     results
         .iter()
-        .map(|(node, outcome)| match outcome {
-            Ok(()) => SpreadNodeResult {
-                name: node.name.clone(),
-                addr: node.addr.clone(),
-                ok: true,
-                error: None,
-            },
-            Err(e) => SpreadNodeResult {
-                name: node.name.clone(),
-                addr: node.addr.clone(),
-                ok: false,
-                error: Some(e.to_string()),
-            },
+        .map(|(node, outcome)| SpreadNodeResult {
+            name: node.name.clone(),
+            addr: node.addr.clone(),
+            ok: outcome.ok,
+            error: outcome.error.clone(),
+            attempts: outcome.attempts,
         })
         .collect()
 }
@@ -299,12 +382,17 @@ pub fn broadcast_node_results(callbacks: &[(SocketAddr, Response)]) -> Vec<Sprea
                 addr: peer.to_string(),
                 ok: true,
                 error: None,
+                // Broadcast has no coordinator-side retry: the node applies
+                // once (deduped by spread_id) and a lost callback is a
+                // reported miss, not a silent one.
+                attempts: 1,
             },
             Response::Error { message } | Response::NotFound { message } => SpreadNodeResult {
                 name: peer.to_string(),
                 addr: peer.to_string(),
                 ok: false,
                 error: Some(message.clone()),
+                attempts: 1,
             },
         })
         .collect()
@@ -511,6 +599,12 @@ pub struct RosterSpread {
     pub secret: SecretSource,
     /// TLS for the coordinator -> node hop (disabled by default).
     pub tls: TlsOptions,
+    /// Retries per node after a transient (transport) failure (4b;
+    /// default [`DEFAULT_APPLY_RETRIES`]). A node verdict is never retried.
+    pub retries: u32,
+    /// Per-attempt timeout so a hung node is a retriable failure instead of
+    /// wedging the spread (4b; default [`DEFAULT_APPLY_TIMEOUT`]).
+    pub timeout: Duration,
     /// A fixed spread id (caller-generated when it must be known up front,
     /// e.g. before streaming progress); a fresh one is generated otherwise.
     pub spread_id: Option<String>,
@@ -569,22 +663,29 @@ pub async fn run_roster_spread(opts: &RosterSpread) -> Result<SpreadResult> {
     let secret = resolve_epidemic_secret(&opts.secret, opts.group_secret_path.as_deref())?;
 
     // Apply to each node in turn, streaming each outcome as it arrives.
-    let mut results: Vec<(NodeConfig, Result<()>)> = Vec::new();
+    // Transient failures are retried with backoff (4b); a node verdict is
+    // final. The outcome carries the attempt count for the record + progress.
+    let mut results: Vec<(NodeConfig, ApplyOutcome)> = Vec::new();
     for node in &opts.roster {
         let node_tls = node_tls_client(&opts.tls, &node.addr)?;
-        let outcome = apply_to_node(&node.addr, &secret.value, &request, node_tls.as_ref()).await;
-        let (ok, error) = match &outcome {
-            Ok(()) => (true, None),
-            Err(e) => (false, Some(e.to_string())),
-        };
+        let outcome = apply_with_retries(
+            &node.addr,
+            &secret.value,
+            &request,
+            node_tls.as_ref(),
+            opts.retries,
+            opts.timeout,
+        )
+        .await;
         emit(
             opts.progress.as_ref(),
             SpreadProgress::Node {
                 spread_id: spread_id.clone(),
                 name: node.name.clone(),
                 addr: node.addr.clone(),
-                ok,
-                error,
+                ok: outcome.ok,
+                error: outcome.error.clone(),
+                attempts: outcome.attempts,
             },
         );
         results.push((node.clone(), outcome));
@@ -762,6 +863,9 @@ pub async fn run_broadcast_spread(opts: &BroadcastSpread) -> Result<SpreadResult
                             addr: peer.to_string(),
                             ok,
                             error,
+                            // Broadcast has no coordinator-side retry: one
+                            // callback per node, so a single attempt.
+                            attempts: 1,
                         });
                     }
                     results.lock().await.push((peer, response));
@@ -1109,14 +1213,22 @@ addr = "10.0.0.1:7711"
                     name: "edge-1".to_string(),
                     addr: "10.0.0.1:7711".to_string(),
                 },
-                Ok(()),
+                ApplyOutcome {
+                    ok: true,
+                    error: None,
+                    attempts: 1,
+                },
             ),
             (
                 NodeConfig {
                     name: "edge-2".to_string(),
                     addr: "10.0.0.2:7711".to_string(),
                 },
-                Err(anyhow::anyhow!("node 10.0.0.2:7711 failed to apply")),
+                ApplyOutcome {
+                    ok: false,
+                    error: Some("node 10.0.0.2:7711 failed to apply".to_string()),
+                    attempts: 3,
+                },
             ),
         ];
 
@@ -1132,14 +1244,30 @@ addr = "10.0.0.1:7711"
         assert_eq!(rec.nodes.len(), 2);
         assert_eq!(rec.nodes[0].name, "edge-1");
         assert!(rec.nodes[0].ok);
+        assert_eq!(rec.nodes[0].attempts, 1);
         assert!(rec.nodes[1].error.is_some());
+        assert_eq!(
+            rec.nodes[1].attempts, 3,
+            "a retried node reports its attempts"
+        );
         assert_eq!(rec.applied, 1);
         assert_eq!(rec.failed, 1);
         assert!(!rec.ok, "a partial spread must not look like success");
 
         // All nodes ok → ok, and an ad-hoc roster has no group.
-        let all_ok: Vec<(NodeConfig, Result<()>)> =
-            results.iter().map(|(n, _)| (n.clone(), Ok(()))).collect();
+        let all_ok: Vec<(NodeConfig, ApplyOutcome)> = results
+            .iter()
+            .map(|(n, _)| {
+                (
+                    n.clone(),
+                    ApplyOutcome {
+                        ok: true,
+                        error: None,
+                        attempts: 1,
+                    },
+                )
+            })
+            .collect();
         let rec2 = roster_record("sid-2", None, "webapp", "1.2.3", "cdcd", &all_ok);
         assert!(rec2.ok);
         assert_eq!(rec2.failed, 0);
@@ -1183,5 +1311,217 @@ addr = "10.0.0.1:7711"
         assert_eq!(host_of("edge-1.local:8080"), "edge-1.local");
         // A bare host (no port) is returned as-is.
         assert_eq!(host_of("edge-1.local"), "edge-1.local");
+    }
+
+    // ── 4b retry engine: a fake node speaking the real wire protocol ────────
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// What the fake node answers to an `ApplyDeployment` request.
+    #[derive(Clone, Copy)]
+    enum FakeApply {
+        /// `Success` — the node applied the deployment.
+        Succeed,
+        /// `Error { message }` — a verdict (the retry loop must not re-ask).
+        Verdict(&'static str),
+        /// Accept the request but never reply — the coordinator's per-attempt
+        /// timeout is what turns this into a transient failure.
+        Hang,
+    }
+
+    /// A fake node: a TCP listener speaking the real
+    /// `AuthChallenge`/`AuthResponse` + request/response protocol. While the
+    /// connection count is below `drop_first`, it accepts and immediately
+    /// disconnects (a *dropped* node — a transient failure). Otherwise it
+    /// completes the handshake (verifying the client's signature, like a real
+    /// node would), answers `GetCapabilities` with a capability list, and
+    /// answers `ApplyDeployment` per `apply`. Returns the endpoint and a
+    /// live count of accepted connections.
+    async fn spawn_fake_node(
+        secret: &str,
+        apply: FakeApply,
+        drop_first: u32,
+    ) -> (String, Arc<AtomicUsize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let conns = Arc::new(AtomicUsize::new(0));
+        let conns_c = conns.clone();
+        let secret = secret.to_string();
+        tokio::spawn(async move {
+            loop {
+                let (stream, _peer) = match listener.accept().await {
+                    Ok(s) => s,
+                    Err(_) => break,
+                };
+                let n = conns_c.fetch_add(1, Ordering::SeqCst) as u32;
+                let secret = secret.clone();
+                if n < drop_first {
+                    // A dropped node: accept, then close before the handshake.
+                    drop(stream);
+                    continue;
+                }
+                tokio::spawn(async move { serve_fake_conn(stream, &secret, apply).await });
+            }
+        });
+        (addr, conns)
+    }
+
+    /// One fake-node connection: challenge → verify signed response → read the
+    /// request → reply (`GetCapabilities` or `ApplyDeployment` per policy).
+    async fn serve_fake_conn(stream: TcpStream, secret: &str, apply: FakeApply) {
+        // 1. Send the challenge (the client reads it first).
+        let nonce = format!("fake-nonce-{}", std::process::id());
+        let mut challenge = serde_json::to_string(&AuthChallenge {
+            nonce: nonce.clone(),
+        })
+        .unwrap();
+        challenge.push('\n');
+        let mut out = stream;
+        if out.write_all(challenge.as_bytes()).await.is_err() {
+            return;
+        }
+        if out.flush().await.is_err() {
+            return;
+        }
+        // 2. Read the client's signed response; verify it (a real node would).
+        let mut reader = BufReader::new(out);
+        let mut line = String::new();
+        if reader.read_line(&mut line).await.ok().unwrap_or(0) == 0 {
+            return;
+        }
+        let resp: AuthResponse = match serde_json::from_str(line.trim()) {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+        if resp.nonce != nonce || !auth::verify(secret, &nonce, &resp.signature) {
+            // A wrong signature is refused exactly like a forged deployment.
+            return;
+        }
+        // 3. Read the request.
+        let mut req_line = String::new();
+        if reader.read_line(&mut req_line).await.ok().unwrap_or(0) == 0 {
+            return;
+        }
+        let req: AgentRequest = match serde_json::from_str(req_line.trim()) {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+        let reply = match req {
+            AgentRequest::GetCapabilities => Response::Success {
+                data: Some(serde_json::json!({ "capabilities": ["systemd"] })),
+            },
+            AgentRequest::ApplyDeployment { .. } => match apply {
+                FakeApply::Succeed => Response::success(),
+                FakeApply::Verdict(msg) => Response::Error {
+                    message: msg.to_string(),
+                },
+                FakeApply::Hang => {
+                    // Hold the connection open (reader still owns the stream)
+                    // and never reply: the coordinator's per-attempt timeout
+                    // is what turns this into a transient failure.
+                    tokio::time::sleep(Duration::from_secs(30)).await;
+                    return;
+                }
+            },
+            _ => Response::success(),
+        };
+        // 4. Reply on the same stream.
+        let mut out = reader.into_inner();
+        let mut payload = serde_json::to_string(&reply).unwrap();
+        payload.push('\n');
+        let _ = out.write_all(payload.as_bytes()).await;
+        let _ = out.flush().await;
+    }
+
+    fn apply_request() -> AgentRequest {
+        AgentRequest::ApplyDeployment {
+            name: "web".to_string(),
+            version: "1.0.0".to_string(),
+            variables: std::collections::BTreeMap::new(),
+            infections: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn retry_recovers_after_transient_failures() {
+        // The node drops the first two attempts (a flapping connection), then
+        // serves normally: the spread must succeed on the third attempt.
+        let (addr, _conns) = spawn_fake_node("s3cr3t", FakeApply::Succeed, 2).await;
+        let out = apply_with_retries(
+            &addr,
+            "s3cr3t",
+            &apply_request(),
+            None,
+            2,
+            Duration::from_secs(5),
+        )
+        .await;
+        assert!(out.ok, "expected recovery: {out:?}");
+        assert_eq!(out.attempts, 3, "two drops + one success");
+    }
+
+    #[tokio::test]
+    async fn retry_gives_up_after_max_retries() {
+        // A node that never answers (always dropped) is retried `retries`
+        // more times and then reported as a failure — not silently lost.
+        let (addr, _conns) = spawn_fake_node("s3cr3t", FakeApply::Succeed, 1_000_000).await;
+        let out = apply_with_retries(
+            &addr,
+            "s3cr3t",
+            &apply_request(),
+            None,
+            2,
+            Duration::from_secs(2),
+        )
+        .await;
+        assert!(!out.ok);
+        assert!(out.error.is_some(), "a failed apply reports why it failed");
+        assert_eq!(out.attempts, 3, "1 initial + 2 retries");
+    }
+
+    #[tokio::test]
+    async fn verdict_is_not_retried() {
+        // A node that *answers* "no" (a verdict) gets the same answer every
+        // time, so the retry loop stops after the very first attempt.
+        let (addr, _conns) =
+            spawn_fake_node("s3cr3t", FakeApply::Verdict("unit is masked"), 0).await;
+        let out = apply_with_retries(
+            &addr,
+            "s3cr3t",
+            &apply_request(),
+            None,
+            2,
+            Duration::from_secs(5),
+        )
+        .await;
+        assert!(!out.ok);
+        assert_eq!(out.error.as_deref(), Some("unit is masked"));
+        assert_eq!(out.attempts, 1, "a verdict is final — never re-asked");
+    }
+
+    #[tokio::test]
+    async fn timeout_is_transient_and_retried() {
+        // A node that accepts but never replies is a *hung* node: the
+        // per-attempt timeout turns it into a transient failure, so it is
+        // retried and then reported (rather than wedging the spread).
+        let (addr, _conns) = spawn_fake_node("s3cr3t", FakeApply::Hang, 0).await;
+        let out = apply_with_retries(
+            &addr,
+            "s3cr3t",
+            &apply_request(),
+            None,
+            1,
+            Duration::from_millis(150),
+        )
+        .await;
+        assert!(!out.ok);
+        assert!(
+            out.error.as_deref().unwrap().contains("timed out"),
+            "got: {out:?}"
+        );
+        assert_eq!(
+            out.attempts, 2,
+            "1 initial + 1 retry, each bounded by the timeout"
+        );
     }
 }

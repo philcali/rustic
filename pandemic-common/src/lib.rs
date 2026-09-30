@@ -27,10 +27,12 @@ pub use apply::{
 pub use auth::{generate_nonce, generate_secret, sign, verify, EPIDEMIC_SECRET_PATH};
 pub use client::{DaemonClient, PersistentClient};
 pub use coordinator::{
-    apply_to_node, broadcast_node_results, build_intent, host_of, merge_discovered, now_unix_secs,
-    parse_canary_arg, primary_lan_ip, resolve_epidemic_secret, resolve_roster, roster_node_results,
-    roster_record, run_broadcast_spread, run_roster_spread, serve_one_callback, validate_broadcast,
-    BroadcastSpread, ResolvedSecret, RosterSpread, SecretSource, SpreadResult, TlsOptions,
+    apply_with_retries, broadcast_node_results, build_intent, host_of, merge_discovered,
+    now_unix_secs, parse_canary_arg, primary_lan_ip, resolve_epidemic_secret, resolve_roster,
+    roster_node_results, roster_record, run_broadcast_spread, run_roster_spread,
+    serve_one_callback, validate_broadcast, ApplyOutcome, BroadcastSpread, ResolvedSecret,
+    RosterSpread, SecretSource, SpreadResult, TlsOptions, DEFAULT_APPLY_RETRIES,
+    DEFAULT_APPLY_TIMEOUT,
 };
 pub use discovery::{advertise_node, discover_nodes, Advertiser, DiscoveredNode, SERVICE_FQDN};
 pub use groups::{

@@ -73,14 +73,24 @@ export function renderEpidemicGroups(data, container) {
 /**
  * Render one spread record's per-node outcomes (✓/✗ + error).
  */
+/**
+ * A "(×N attempts)" badge when a node needed more than one apply attempt
+ * (increment 4b retries). Omitted for the single-attempt (common) case.
+ */
+function attemptsBadge(n) {
+    return (n && n.attempts > 1)
+        ? ` <span class="epidemic-attempts" title="retried ${n.attempts} times">${n.attempts}×</span>`
+        : '';
+}
+
 function renderSpreadNodes(spread) {
     const nodes = spread.nodes || [];
     if (nodes.length === 0) {
         return '<div class="epidemic-muted">no per-node detail (legacy record)</div>';
     }
     return nodes.map(n => n.ok
-        ? `<div class="epidemic-node ok"><span class="mark">✓</span> <code>${esc(n.name)}</code> <span class="epidemic-addr">${esc(n.addr)}</span></div>`
-        : `<div class="epidemic-node fail"><span class="mark">✗</span> <code>${esc(n.name)}</code> <span class="epidemic-addr">${esc(n.addr)}</span> <span class="epidemic-error">${esc(n.error || 'failed')}</span></div>`
+        ? `<div class="epidemic-node ok"><span class="mark">✓</span> <code>${esc(n.name)}</code> <span class="epidemic-addr">${esc(n.addr)}</span>${attemptsBadge(n)}</div>`
+        : `<div class="epidemic-node fail"><span class="mark">✗</span> <code>${esc(n.name)}</code> <span class="epidemic-addr">${esc(n.addr)}</span>${attemptsBadge(n)} <span class="epidemic-error">${esc(n.error || 'failed')}</span></div>`
     ).join('');
 }
 
@@ -203,8 +213,8 @@ export function renderEpidemicProgress(container) {
 
     const nodeList = nodes.length
         ? nodes.map(n => n.ok
-            ? `<div class="epidemic-node ok"><span class="mark">✓</span> <code>${esc(n.name)}</code> <span class="epidemic-addr">${esc(n.addr)}</span></div>`
-            : `<div class="epidemic-node fail"><span class="mark">✗</span> <code>${esc(n.name)}</code> <span class="epidemic-addr">${esc(n.addr)}</span> <span class="epidemic-error">${esc(n.error || 'failed')}</span></div>`
+            ? `<div class="epidemic-node ok"><span class="mark">✓</span> <code>${esc(n.name)}</code> <span class="epidemic-addr">${esc(n.addr)}</span>${attemptsBadge(n)}</div>`
+            : `<div class="epidemic-node fail"><span class="mark">✗</span> <code>${esc(n.name)}</code> <span class="epidemic-addr">${esc(n.addr)}</span>${attemptsBadge(n)} <span class="epidemic-error">${esc(n.error || 'failed')}</span></div>`
         ).join('')
         : '<div class="epidemic-muted">waiting for node results…</div>';
 
@@ -254,6 +264,7 @@ export function handleEpidemicProgress(payload, onFinished) {
                 addr: event.addr,
                 ok: event.ok,
                 error: event.error,
+                attempts: event.attempts,
             });
             break;
         }
@@ -484,7 +495,7 @@ export async function triggerEpidemicSpread(container) {
             for (const n of record.nodes || []) {
                 if (n.addr || n.name) {
                     liveProgress.nodes.set(n.addr || n.name, {
-                        name: n.name, addr: n.addr, ok: n.ok, error: n.error,
+                        name: n.name, addr: n.addr, ok: n.ok, error: n.error, attempts: n.attempts,
                     });
                 }
             }

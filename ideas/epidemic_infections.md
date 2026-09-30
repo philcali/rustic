@@ -54,7 +54,7 @@ Epidemic infections enable configuration and updates to "spread" across pandemic
 | 1 | Node / group / coordinator + reliable TCP spread | Foundation | **done** (v0.5.0) |
 | 2 | Discovery (mDNS/Bonjour) — roster discovery | Level 1 | **done** |
 | 3 | Multicast + targeting + canary | Level 2 | **done** |
-| 4 | Reliability + hardening (retries, audit, rate-limit, per-node secrets, TLS, signing) | Level 3 + Phase 4 | **in progress** — 4a TLS done; sender-side audit done (shipped as 5a); retries/idempotency, rate-limit, payload signing, per-node secrets/mTLS remaining |
+| 4 | Reliability + hardening (retries, audit, rate-limit, per-node secrets, TLS, signing) | Level 3 + Phase 4 | **in progress** — 4a TLS done; 4b retries + idempotency done (transient-vs-verdict, per-attempt timeout, per-node `attempts`, CLI `--retries`/`--apply-timeout`, REST `retries`/`timeout_secs`); sender-side audit done (shipped as 5a); **remaining: 4c rate-limit, 4d payload signing, 4e per-node secrets/mTLS** |
 | 5 | Epidemic observability (console / UI to see + manage the spread) | Cross-cutting (all levels) | **done** — 5a audit/record foundation, 5b read-only console, 5c console trigger + live progress all shipped |
 
 #### Increment 1 — Node / group / coordinator + reliable TCP spread — **done**
@@ -197,14 +197,23 @@ Goal: make epidemic production-grade.
   (`TlsServer`/`TlsClient`); the wire handshake is unchanged (TLS wraps the
   stream). Tests: `pandemic-node` `tls_round_trip`, `tls_client_refuses_untrusted_node`,
   `cleartext_client_cannot_talk_to_tls_node`.
-- per-node secrets or mTLS identity in place of the single shared group secret
-  — **remaining.**
-- **Retries + idempotency** on the apply — **remaining.** (The sibling
-  **sender-side audit** entry per spread — which nodes, which plan hash,
-  per-node outcome — **shipped as 5a**, the audit/record foundation.)
-- **Rate limiting** to prevent spread storms — **remaining.**
+- **Retries + idempotency** on the apply — **done (4b).** A coordinator→node
+  apply failure is split into two classes: **transient** (connection refused, a
+  hung handshake, or a per-attempt timeout) is retried with exponential backoff
+  up to `retries` (default 2 ⇒ 3 attempts total); a node **verdict** (it
+  answered *Error*/*NotFound* — "unit is masked", "already applied") is final
+  and **never re-asked**, which is exactly what makes a re-apply idempotent.
+  Each attempt is bounded by a per-attempt `timeout` (default 30 s) so a hung
+  node becomes retriable instead of wedging the spread. Per-node `attempts` are
+  recorded in the 5a `SpreadRecord`. Surfaces: CLI `--retries` /
+  `--apply-timeout`, REST `retries` / `timeout_secs`, and the console's per-node
+  "N×" badge. (The sibling **sender-side audit** entry per spread shipped as
+  5a.)
+- **Rate limiting** to prevent spread storms — **remaining (4c).**
 - **Payload signing** (the production gate, shared with the registry): a node
-  only applies a deployment it can verify — **remaining.**
+  only applies a deployment it can verify — **remaining (4d).**
+- **per-node secrets or mTLS identity** in place of the single shared group
+  secret — **remaining (4e).**
 - **Acceptance:** a spread over an untrusted network is end-to-end encrypted and
   signed; a forged/unsigned deployment is refused; a dropped node is retried and
   reported, not silently lost.
@@ -305,6 +314,19 @@ events it produced — so **"see the spread" is the honest first slice**, ahead 
 
 ### Resume point
 
+- **4b is done and committed.** Retries + idempotency on the coordinator→node
+  apply: a **transient** failure (connection refused, a hung handshake, or a
+  per-attempt timeout) is retried with exponential backoff up to `retries`
+  (default 2 ⇒ 3 attempts); a node **verdict** (it answered *Error*/*NotFound*)
+  is final and never re-asked; per-node `attempts` land in the 5a
+  `SpreadRecord`. Surfaces: CLI `--retries` / `--apply-timeout`, REST
+  `retries` / `timeout_secs`, the console's per-node "N×" badge. Verified
+  in-process (4 unit tests in `coordinator` against a fake node) and E2E in
+  docker (`pandemic-systemd:latest`, node at `127.0.0.1:7711`, host fake nodes
+  in `success`/`error`/`drop2` modes) over both CLI and REST: happy path
+  `attempts:1`; a refused/dead node retried to `attempts:3` **and reported, not
+  silently lost**; a verdict node `attempts:1` and never re-asked; a
+  drop-then-serve node recovered on retry. Reader key → 403 on the trigger.
 - **5c is done and committed — Increment 5 is complete.** 5a (audit record),
   5b (read surface: `GET /api/epidemic/spreads`, `GET /api/epidemic/groups`,
   scope `epidemic:read`, the console's **Epidemic** section), and 5c (trigger:
@@ -312,9 +334,9 @@ events it produced — so **"see the spread" is the honest first slice**, ahead 
   `/api/events/stream`) are all in. The shared code — coordinator logic in
   `pandemic-common::coordinator`, history in `pandemic-common::history`,
   types in `pandemic-protocol` — is used by CLI and REST alike, read- and
-  write-side. **Next up: the rest of Increment 4** — per-node secrets /
-  mTLS identity, retries + idempotency, rate limiting, and **payload
-  signing** (the production gate, shared with the registry).
+  write-side. **Next up: the rest of Increment 4** — 4c rate limiting, 4d
+  **payload signing** (the production gate, shared with the registry), and 4e
+  per-node secrets / mTLS identity.
 - **The gate to pass before an increment counts as done** (mirrors CI):
   `cargo build --workspace` && `cargo clippy --workspace -- -D warnings` &&
   `cargo fmt --check` && `cargo test --workspace`.
@@ -379,6 +401,18 @@ events it produced — so **"see the spread" is the honest first slice**, ahead 
     topic `epidemic.spread`); console: `epidemic.js` `renderEpidemicTrigger`
     (the "Start a spread" form) + `handleEpidemicProgress` (the live panel)
     driven by the `/api/events/stream` `epidemic.spread` case in `main.js`.
+  - `pandemic-common/src/coordinator.rs` — the **shared** coordinator used by
+    CLI *and* REST: `run_roster_spread` / `run_broadcast_spread`,
+    `RosterSpread`/`BroadcastSpread` inputs. **4b retry engine lives here:**
+    `apply_with_retries` (the per-node loop), `apply_once` (one dial→auth→apply
+    bounded by `tokio::time::timeout`), the `ApplyResult { Ok, Transient,
+    Verdict }` classification (transient ⇒ retried, verdict ⇒ final),
+    `ApplyOutcome { ok, error, attempts }`, and the constants
+    `DEFAULT_APPLY_RETRIES` (2) / `DEFAULT_APPLY_TIMEOUT` (30 s) /
+    `RETRY_BACKOFF_BASE` (500 ms, `*2^(n-1)`). Fake-node tests
+    (`retry_recovers_after_transient_failures`, `retry_gives_up_after_max_retries`,
+    `verdict_is_not_retried`, `timeout_is_transient_and_retried`) are in the
+    same file's `#[cfg(test)]`.
   - How-to: `docs/epidemic.md`; operator loop: `e2e/README.md` (epidemic section).
 
 ---

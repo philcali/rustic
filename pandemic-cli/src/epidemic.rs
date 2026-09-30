@@ -48,7 +48,7 @@ use pandemic_common::{
     deployment_apply_infections, generate_spread_id, history, merge_discovered, parse_canary_arg,
     primary_lan_ip, resolve_roster, run_broadcast_spread, run_roster_spread, sha256_hex,
     validate_broadcast, BroadcastSpread, RosterSpread, SecretSource, TlsOptions,
-    DEFAULT_MULTICAST_GROUP, DEFAULT_MULTICAST_PORT,
+    DEFAULT_APPLY_RETRIES, DEFAULT_APPLY_TIMEOUT, DEFAULT_MULTICAST_GROUP, DEFAULT_MULTICAST_PORT,
 };
 use pandemic_protocol::{AgentRequest, Canary, SpreadMode, SpreadRecord, SpreadStage};
 
@@ -169,6 +169,17 @@ pub enum EpidemicAction {
         /// host (the `host` of its `host:port` address).
         #[arg(long)]
         tls_server_name: Option<String>,
+
+        // ── Retries (increment 4b): a dropped node is retried, not lost ─────
+        /// How many times to retry a node after a failed attempt (transport
+        /// error or per-attempt timeout). Default: [`DEFAULT_APPLY_RETRIES`].
+        /// A node that *answers* an error (a verdict) is not retried.
+        #[arg(long, default_value_t = DEFAULT_APPLY_RETRIES)]
+        retries: u32,
+        /// Per-attempt timeout in seconds: a node that never answers is
+        /// retried after this long. Default: 30.
+        #[arg(long, default_value_t = DEFAULT_APPLY_TIMEOUT.as_secs())]
+        apply_timeout: u64,
     },
     /// List recent spreads (roster + broadcast, newest first)
     Spreads {
@@ -220,6 +231,8 @@ pub async fn handle_epidemic_command(
             tls,
             tls_ca,
             tls_server_name,
+            retries,
+            apply_timeout,
         } => {
             let secret = SecretSource::new(epidemic_secret, epidemic_secret_path);
             let probe = Discovery {
@@ -250,6 +263,8 @@ pub async fn handle_epidemic_command(
                 multicast_port.unwrap_or(DEFAULT_MULTICAST_PORT),
                 wait,
                 tls_opts,
+                retries,
+                Duration::from_secs(apply_timeout),
             )
             .await
         }
@@ -292,6 +307,8 @@ async fn spread(
     mcast_port: u16,
     wait_secs: u64,
     tls: TlsOptions,
+    retries: u32,
+    apply_timeout: Duration,
 ) -> Result<()> {
     // Broadcast flag validation (cheap, up front — before any network I/O).
     validate_broadcast(
@@ -392,6 +409,8 @@ async fn spread(
         plan: dp,
         secret: epidemic_secret,
         tls,
+        retries,
+        timeout: apply_timeout,
         spread_id: None,
         history_path: None,
         progress: None,

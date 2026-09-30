@@ -367,10 +367,51 @@ in the spread history (`$XDG_STATE_HOME/pandemic/spread-history.log`, else
 spread id, the mode (roster/broadcast) and stage (full/canary/promote), the
 plan's name + version + `sha256` (the plan hash), the target group (roster
 `--group`), the origin/criteria/canary (broadcast), and a **per-node
-result** — `name`, `addr`, `ok`, and the `error` for failed nodes.
+result** — `name`, `addr`, `ok`, the `error` for failed nodes, and the
+`attempts` it took (1 for a first-try success or a verdict; >1 only when a
+transient failure was retried).
 `epidemic spreads` lists the history newest-first with each node's ✓/✗ and
 error. The file is append-only JSONL; lines written by older releases (TSV)
 are still read back, so an existing history keeps working.
+
+### Retries and idempotency
+
+A coordinator→node apply can fail for two very different reasons, and the
+coordinator treats them differently (this is the "a dropped node is retried
+and reported, not silently lost" guarantee):
+
+- **Transient** — the node was unreachable: connection refused, a handshake
+  that hangs, or an attempt that exceeds the per-attempt `timeout`. This is
+  *retried* with exponential backoff (500 ms base, doubling) up to `retries`
+  extra attempts. A node that is briefly down, or slow to come up, recovers
+  without operator intervention.
+- **Verdict** — the node *answered* and said no (an *Error* or *NotFound*:
+  "unit is masked", "already applied", a bad plan). This is **final and never
+  re-asked** — re-asking would just get the same answer, and treating it as
+  transient is what would make a re-apply non-idempotent.
+
+Per-node `attempts` are recorded in the history (1 on a first-try success or a
+verdict; >1 only when a transient failure was retried). Defaults are **2
+retries** (3 attempts total) and a **30 s** per-attempt timeout, so a hung
+node becomes retriable instead of wedging the whole spread.
+
+Override them per spread:
+
+| Surface | Flags / fields | Meaning |
+|---|---|---|
+| CLI | `--retries <n>` | Extra attempts after a transient failure (default `2`) |
+| CLI | `--apply-timeout <secs>` | Per-attempt timeout (default `30`) |
+| REST | `retries` | Same as `--retries` |
+| REST | `timeout_secs` | Same as `--apply-timeout` |
+
+```bash
+# A node that may still be booting: give it 3 extra tries, 10 s each.
+pandemic-cli epidemic spread ./webapp/deployment.toml --group edge \
+  --retries 3 --apply-timeout 10
+```
+
+The console's per-node rows show a small **"N×"** badge when a node needed more
+than one attempt.
 
 ### Reading it in the console
 
@@ -401,7 +442,10 @@ spread is indistinguishable from a CLI one:
   `path` to `deployment.toml`.
 - **Roster mode** — a named `group` from `groups.toml` and/or ad-hoc
   `nodes` (`host:port`), plus the epidemic `secret` (or `secret_path`) and
-  the TLS options for the coordinator→node hop.
+  the TLS options for the coordinator→node hop. Optional `retries` and
+  `timeout_secs` override the retry/timeout defaults (see [Retries and
+  idempotency](#retries-and-idempotency)); the live panel shows each node's
+  "N×" attempt badge.
 - **Broadcast mode** — `broadcast` + `criteria` (`KEY=VALUE`, AND), optional
   `canary` (`25` or `KEY=VALUE`), `promote` + `spread_id` to roll out a
   prior canary, and the multicast group/port + `wait`.
@@ -482,9 +526,12 @@ The larger epidemic vision (discovery, multicast, reliability) is tracked in
 3. **Multicast + targeting + canary** — subnet-wide spread, criteria targeting,
    canary + promote — *done* (node joins the intent group;
    `epidemic spread --broadcast`; `epidemic spreads` history).
-4. **Reliability + hardening** — TLS on the coordinator→node hop and the
-   sender-side audit record are *done*; retries + idempotency, rate limiting,
-   per-node secrets/mTLS, and payload signing (the production gate) remain.
+4. **Reliability + hardening** — TLS on the coordinator→node hop, the
+   sender-side audit record, and **retries + idempotency** (transient-vs-verdict,
+   per-attempt timeout, per-node `attempts`; see [Retries and
+   idempotency](#retries-and-idempotency)) are *done*; rate limiting (4c),
+   per-node secrets/mTLS (4e), and payload signing (4d — the production gate)
+   remain.
 5. **Observability** — *done.* The audit/record foundation (every spread
    records a per-node outcome, readable via `epidemic spreads`), the
    read-only console surface (REST `GET /api/epidemic/spreads` +

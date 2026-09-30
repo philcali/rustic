@@ -20,9 +20,14 @@ Planned improvements for the Pandemic codebase.
   **5c (the console write surface: REST `POST /api/epidemic/spread` behind an
   `epidemic:spread` scope triggers a roster *or* broadcast spread and streams
   live per-node progress over the existing `/api/events/stream` websocket,
-  which the console's Epidemic section renders as it lands)**. Still open: the
-  rest of Increment 4 (retries + idempotency, rate limiting, payload signing,
-  per-node secrets/mTLS). The codified, cross-session build plan
+  which the console's Epidemic section renders as it lands)**. And **4b (retries + idempotency: a coordinator→node apply that fails
+  transiently — connection refused, a hung handshake, or a per-attempt timeout —
+  is retried with exponential backoff and its `attempts` are recorded per node,
+  while a node *verdict* (it answered "unit is masked", "already applied", …)
+  is final and never re-asked; CLI `--retries`/`--apply-timeout` and REST
+  `retries`/`timeout_secs` override the defaults of 2 retries / 30 s)**. Still open: the
+  rest of Increment 4 (rate limiting, payload signing, per-node
+  secrets/mTLS). The codified, cross-session build plan
   — fixed decisions, increment status, resume point, and code map — lives in
   [`ideas/epidemic_infections.md`](ideas/epidemic_infections.md).
   Operator how-to: [`docs/epidemic.md`](docs/epidemic.md).

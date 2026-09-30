@@ -605,6 +605,17 @@ pub struct SpreadNodeResult {
     /// The failure message (when `ok` is false).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// How many apply attempts this took (increment 4b): 1 for a single
+    /// attempt or the broadcast path, up to `retries + 1` when the coordinator
+    /// retried transient failures.
+    #[serde(default = "default_one")]
+    pub attempts: u32,
+}
+
+/// `1` — the serde default for [`SpreadNodeResult::attempts`], so history
+/// lines written before retries existed read back as a single attempt.
+fn default_one() -> u32 {
+    1
 }
 
 /// One recorded spread: one JSON line of the spread history.
@@ -712,6 +723,9 @@ pub enum SpreadProgress {
         /// The failure message (when `ok` is false).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
+        /// How many apply attempts this took (4b roster retries; 1 otherwise).
+        #[serde(default = "default_one")]
+        attempts: u32,
     },
     /// The spread has finished (the full audit record is in the history).
     Finished {
@@ -1256,12 +1270,14 @@ mod tests {
                     addr: "10.0.0.1:7711".to_string(),
                     ok: true,
                     error: None,
+                    attempts: 1,
                 },
                 SpreadNodeResult {
                     name: "edge-2".to_string(),
                     addr: "10.0.0.2:7711".to_string(),
                     ok: false,
                     error: Some("node 10.0.0.2:7711 failed to apply".to_string()),
+                    attempts: 3,
                 },
             ],
             applied: 1,

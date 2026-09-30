@@ -130,6 +130,7 @@ mod tests {
             addr: addr.to_string(),
             ok,
             error: (!ok).then(|| format!("node {addr} failed to apply")),
+            attempts: 1,
         }
     }
 
